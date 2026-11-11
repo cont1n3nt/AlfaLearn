@@ -18,3 +18,4 @@ class Settings(BaseSettings):
     bot_enabled: bool = True
     host: str = "127.0.0.1"
     port: int = Field(default=8000, ge=1, le=65535)
+    group_delay_seconds: float = Field(default=2.0, ge=0.1, le=30)

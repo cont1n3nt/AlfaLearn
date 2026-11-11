@@ -5,11 +5,32 @@ from contextlib import asynccontextmanager, suppress
 from aiogram import Bot
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from alfalearn.answers import KIND_LABELS, MessageKind, build_answer
 from alfalearn.bot import HELLO_MESSAGE, create_dispatcher
 from alfalearn.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class AnswerRequest(BaseModel):
+    message: str = Field(min_length=1, description="Сообщение пользователя")
+
+
+class AnswerResponse(BaseModel):
+    answer: str
+
+
+class GroupAnswerRequest(BaseModel):
+    types: list[MessageKind] = Field(min_length=1, max_length=100)
+
+
+def typed_answer_endpoint(kind: MessageKind):
+    async def answer() -> AnswerResponse:
+        return AnswerResponse(answer=build_answer([kind]))
+
+    return answer
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -33,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if webhook.url:
                 raise RuntimeError("Bot has an active webhook. Use a bot configured for polling.")
             app.state.bot_username = me.username
-            dispatcher = create_dispatcher()
+            dispatcher = create_dispatcher(settings.group_delay_seconds)
             task = asyncio.create_task(
                 dispatcher.start_polling(
                     bot,
@@ -55,8 +76,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 yield
             finally:
                 task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                try:
+                    with suppress(asyncio.CancelledError):
+                        await task
+                finally:
+                    await dispatcher["answer_buffer"].close()
 
     app = FastAPI(title="AlfaLearn microbot", version="0.1.0", lifespan=lifespan)
 
@@ -64,6 +88,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/hello")
     async def hello() -> dict[str, str]:
         return {"message": HELLO_MESSAGE}
+
+    @app.post("/answers", tags=["Ответы"], response_model=AnswerResponse)
+    async def answer(request: AnswerRequest) -> AnswerResponse:
+        """Вернуть заглушку ответа; содержимое сообщения пока не обрабатывается."""
+        return AnswerResponse(answer=build_answer([MessageKind.TEXT]))
+
+    for kind in MessageKind:
+        app.add_api_route(
+            f"/answers/{kind.value}", typed_answer_endpoint(kind), methods=["POST"],
+            response_model=AnswerResponse, tags=["Ответы"],
+            summary=KIND_LABELS[kind].capitalize(), name=f"answer_{kind.value}",
+        )
+
+    @app.post("/answers/group", tags=["Ответы"], response_model=AnswerResponse)
+    async def group_answer(request: GroupAnswerRequest) -> AnswerResponse:
+        """Вернуть один ответ для перечисленных типов сообщений."""
+        return AnswerResponse(answer=build_answer(request.types, len(request.types)))
 
     @app.get("/health")
     async def health() -> JSONResponse:
