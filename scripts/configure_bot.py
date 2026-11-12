@@ -17,7 +17,7 @@ async def main() -> None:
         await bot.set_my_description(
             description=(
                 "АльфаНавигатор — прототип помощника по обучающим материалам Альфа-Курса. "
-                "Создан для хакатона. Сейчас доступна проверка связи: /start и /hello."
+                "Создан для хакатона. Помогает разобраться, какие курсы вам доступны. Все команды — /help."
             )
         )
         await bot.set_my_short_description(
@@ -25,9 +25,12 @@ async def main() -> None:
         )
         await bot.set_my_commands(commands=[
             BotCommand(command="start", description="Знакомство с АльфаНавигатором"),
-            BotCommand(command="hello", description="Hello, world! — проверка связи"),
-            BotCommand(command="help", description="Помощь"),
+            BotCommand(command="hello", description="Приветствие: что умеет бот"),
+            BotCommand(command="help", description="Доступные команды"),
             BotCommand(command="reset", description="Очистить историю этого диалога"),
+            BotCommand(command="login", description="Войти в демо-аккаунт"),
+            BotCommand(command="profile", description="Мой доступ к платным курсам"),
+            BotCommand(command="logout", description="Выйти из аккаунта"),
         ])
         me = await bot.get_me()
         name = await bot.get_my_name()

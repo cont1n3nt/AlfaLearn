@@ -10,7 +10,9 @@ from fastapi.testclient import TestClient
 
 from alfalearn.api import create_app
 from alfalearn.answers import ANSWER_MESSAGE
-from alfalearn.bot import HELLO_MESSAGE, START_MESSAGE, create_dispatcher
+from alfalearn.bot import greeting_message, help_message, create_dispatcher
+
+GREETING = greeting_message(llm=False, accounts=False)
 from alfalearn.config import Settings
 
 
@@ -51,9 +53,9 @@ def test_answers_api_requires_nonempty_message(payload):
 
 
 @pytest.mark.parametrize("text,expected", [
-    ("/start", START_MESSAGE),
-    ("/hello", HELLO_MESSAGE),
-    ("/help", HELLO_MESSAGE),
+    ("/start", GREETING),
+    ("/hello", GREETING),
+    ("/help", help_message(accounts=False)),
     ("Привет", ANSWER_MESSAGE),
     ("/unknown", ANSWER_MESSAGE),
 ])

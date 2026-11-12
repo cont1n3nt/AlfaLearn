@@ -28,8 +28,10 @@ class Settings(BaseSettings):
     history_path: Path = PROJECT_ROOT / ".run" / "conversations.sqlite3"
     history_context_chars: int = Field(default=12_000, ge=4_000, le=16_000)
     ollama_max_concurrency: int = Field(default=4, ge=1, le=16)
+    demo_users_enabled: bool = True
+    accounts_path: Path = PROJECT_ROOT / ".run" / "accounts.sqlite3"
 
-    @field_validator("history_path")
+    @field_validator("history_path", "accounts_path")
     @classmethod
     def resolve_history_path(cls, value: Path) -> Path:
         value = value.expanduser()

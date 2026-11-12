@@ -7,6 +7,9 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from alfalearn.accounts.api import create_accounts_router
+from alfalearn.accounts.service import AccountService
+from alfalearn.accounts.store import AccountStore
 from alfalearn.answers import KIND_LABELS, MessageKind, build_answer
 from alfalearn.bot import HELLO_MESSAGE, create_dispatcher
 from alfalearn.config import Settings
@@ -71,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 llm=app.state.llm,
                 classification_timeout_seconds=settings.classification_timeout_seconds,
                 memory=app.state.memory, history_context_chars=settings.history_context_chars,
+                accounts=app.state.accounts,
             )
             task = asyncio.create_task(
                 dispatcher.start_polling(
@@ -103,6 +107,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.llm = None
         app.state.memory = None
+        app.state.accounts = None
+        if settings.demo_users_enabled:
+            # Creates the database and the three demo users on the first start.
+            app.state.accounts = AccountService(AccountStore(settings.accounts_path))
+            app.state.accounts.seed_demo()
         if settings.ollama_enabled:
             key = settings.ollama_api_key.get_secret_value() if settings.ollama_api_key else None
             if settings.ollama_base_url.host == "ollama.com" and not key:
@@ -118,6 +127,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             if app.state.memory is not None:
                 app.state.memory.close()
+            if app.state.accounts is not None:
+                app.state.accounts.store.close()
             if app.state.llm is not None:
                 await app.state.llm.close()
 
@@ -150,6 +161,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def group_answer(request: GroupAnswerRequest) -> AnswerResponse:
         """Вернуть один ответ для перечисленных типов сообщений."""
         return AnswerResponse(answer=build_answer(request.types, len(request.types)))
+
+    if settings.demo_users_enabled:
+        app.include_router(create_accounts_router())
 
     @app.get("/health")
     async def health() -> JSONResponse:
