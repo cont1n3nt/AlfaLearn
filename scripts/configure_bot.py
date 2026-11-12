@@ -27,6 +27,7 @@ async def main() -> None:
             BotCommand(command="start", description="Знакомство с АльфаНавигатором"),
             BotCommand(command="hello", description="Hello, world! — проверка связи"),
             BotCommand(command="help", description="Помощь"),
+            BotCommand(command="reset", description="Очистить историю этого диалога"),
         ])
         me = await bot.get_me()
         name = await bot.get_my_name()

@@ -9,7 +9,8 @@ from aiogram.types import Chat, Message, Update, User
 from fastapi.testclient import TestClient
 
 from alfalearn.api import create_app
-from alfalearn.bot import ANSWER_MESSAGE, HELLO_MESSAGE, START_MESSAGE, create_dispatcher
+from alfalearn.answers import ANSWER_MESSAGE
+from alfalearn.bot import HELLO_MESSAGE, START_MESSAGE, create_dispatcher
 from alfalearn.config import Settings
 
 
