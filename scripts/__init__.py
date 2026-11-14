@@ -1,1 +1,1 @@
-"""Local tools for corpus preparation and evaluation."""
+"""Local development and maintenance commands."""
