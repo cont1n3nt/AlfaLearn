@@ -24,6 +24,7 @@ bot-runtime = [
 ]
 bot-test = ["httpx==0.28.1", "pytest==9.2.0"]
 corpus = ["beautifulsoup4==4.15.0", "huggingface-hub==0.36.0", "psycopg[binary]==3.3.8", "tokenizers==0.22.2"]
+diarization = [{ include-group = "asr" }, "sherpa-onnx==2.0.1"]
 lint = ["ruff==0.14.14"]
 
 [project.scripts]

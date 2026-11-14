@@ -22,9 +22,9 @@ Get-Content -Raw -Encoding UTF8 scripts/audit_podcasts.sql | docker exec -i alfa
 
 Существующие субтитры можно привести к JSON по образцу [учебного выпуска](../../tests/fixtures/podcast-demo.json). У каждого выпуска есть `episode_id`, `title`, проверенный HTTPS URL и массив `cues`. Реплики должны идти по времени без пересечений и содержать `start_sec`, `end_sec` и `text`.
 
-### Импорт из сервиса обработки медиа
+### Импорт готовых расшифровок
 
-Сервис из ветки [podcast-transcription](https://github.com/cont1n3nt/AlfaLearn/tree/89adb9bf0baca7b92aaa7fac06f8d48ac060eaec) отдаёт `results.json` через `GET /api/videos/{id}/export`. Скачай экспорт обработанного выпуска в `data/local/`. При создании задания в сервисе можно передать UUID выпуска из каталога в `external_id`, чтобы при импорте проверить совпадение.
+Скрипт принимает ранее сохранённый `results.json` медиа-сервиса. Если в экспорте указан `external_id`, он должен совпадать с идентификатором выпуска.
 
 ```powershell
 uv run --locked python -m scripts.import_podcast_export --input data/local/results.json --episode-id "<UUID выпуска>" --title "<Название>" --url "<HTTPS-страница выпуска>" --output data/local/podcast.imported.candidate.json
@@ -32,13 +32,29 @@ uv run --locked python -m scripts.import_podcast_export --input data/local/resul
 
 Импорт читает `segments` и переносит времена воспроизведения из `t_start` и `t_end`. Опция `--speaker-segments` выбирает дорожку с разделением голосов. При смене метки голоса начинается новый поисковый фрагмент. Метки вроде `Speaker 1` обозначают разные голоса внутри записи. Для пользовательской ссылки указывай страницу из каталога выпуска. Результат проверяется и подключается по SHA-256 так же, как собственная расшифровка.
 
-Проверка совместимости использовала локальный выпуск о сервисе, представленный в формате экспорта ветки. Импорт сохранил 1323 реплики и их таймкоды, повторно построив 82 фрагмента. Запрос через `alfa-ai` по импортированному выпуску вернул ссылку и интервал 576,72–621,72 секунды. Сам сервер обработки медиа запускается в окружении его ветки. API ответа и поиск остаются в `alfa_ai`.
+Проверка совместимости использовала локальный выпуск о сервисе, представленный в формате экспорта. Импорт сохранил 1323 реплики и их таймкоды, повторно построив 82 фрагмента. Запрос через `alfa-ai` вернул ссылку и интервал 576,72–621,72 секунды.
+
+### Распознавание аудио и видео
 
 Для локальной аудиозаписи используй `scripts/transcribe_podcast.py` и папку с моделью Whisper для CTranslate2. Скрипт обрабатывает файл на CPU, выводит кандидат на проверку и его контрольную сумму. Пример команды после подстановки своих путей и данных:
 
 ```powershell
 uv run --locked --group asr python -m scripts.transcribe_podcast --audio data/local/episode.wav --model-dir data/local/whisper-model --episode-id episode-1 --title "Название выпуска" --url "https://example.org/podcast" --output data/local/podcast.candidate.json
 ```
+
+Для MP4 или другого локального видео передай `--video` вместо `--audio`. Скрипт использует первую аудиодорожку и учитывает её начальное смещение относительно шкалы воспроизведения. Таймкоды рассчитаны на непрерывную аудиодорожку.
+
+### Разделение спикеров
+
+В интервью можно включить локальное разделение голосов. Понадобятся ONNX-модели сегментации и эмбеддингов. Проверяемая конфигурация использует pyannote segmentation 3.0 и 3D-Speaker ERes2Net. [Сегментация](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-segmentation-models) · [Эмбеддинги спикеров](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models).
+
+```powershell
+uv run --locked --group diarization python -m scripts.transcribe_podcast --video data/local/episode.mp4 --model-dir data/local/whisper-model --episode-id episode-1 --title "Название выпуска" --url "https://example.org/podcast" --speaker-segmentation data/local/diarization-models/sherpa-onnx-pyannote-segmentation-3-0/model.onnx --speaker-embedding data/local/diarization-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx --speakers 2 --output data/local/podcast.speakers.candidate.json
+```
+
+Указывай `--speakers`, только если число спикеров известно. Whisper выдаёт интервалы слов. Скрипт сопоставляет их с интервалами голосов и разделяет реплики при смене спикера. Метки `Speaker 1`, `Speaker 2` различают голоса внутри записи. Сопоставление меток с именами ведущего и гостя требует ручной проверки.
+
+На 90-секундном фрагменте выпуска о сервисе получились 25 реплик, из которых 24 получили одну из двух меток. Реплики прошли проверку порядка и непересечения таймкодов. Для оценки точности меток нужна разметка голосов по аудио. Каталог, подключённый к боту, меняется только после проверки новой расшифровки.
 
 Сверь доступ к записи, ссылку, текст и таймкоды перед подключением. Контрольная сумма фиксирует именно проверенную версию файла. После правок пересчитай её. Храни реальные записи, модели и расшифровки в `data/local/`.
 
