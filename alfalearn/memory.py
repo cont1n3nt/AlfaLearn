@@ -60,7 +60,7 @@ class ConversationStore:
                 CREATE TABLE IF NOT EXISTS conversation_consultation (
                     conversation_key TEXT PRIMARY KEY,
                     profile TEXT NOT NULL,
-                    pending_query TEXT
+                    last_query TEXT
                 );
             """)
         except BaseException:
@@ -181,22 +181,22 @@ class ConversationStore:
     def consultation(self, key: ConversationKey) -> tuple[dict, str | None]:
         with self._lock:
             row = self._db().execute(
-                "SELECT profile, pending_query FROM conversation_consultation WHERE conversation_key = ?",
+                "SELECT profile, last_query FROM conversation_consultation WHERE conversation_key = ?",
                 (_encoded_key(key),),
             ).fetchone()
         return (json.loads(row[0]), row[1]) if row else ({}, None)
 
     def save_consultation(
-        self, key: ConversationKey, profile: dict, pending_query: str | None,
+        self, key: ConversationKey, profile: dict, last_query: str | None,
     ) -> None:
         with self._lock:
             connection = self._db()
             with connection:
                 connection.execute(
-                    """INSERT INTO conversation_consultation (conversation_key, profile, pending_query)
+                    """INSERT INTO conversation_consultation (conversation_key, profile, last_query)
                        VALUES (?, ?, ?) ON CONFLICT(conversation_key) DO UPDATE SET
-                           profile = excluded.profile, pending_query = excluded.pending_query""",
-                    (_encoded_key(key), json.dumps(profile, ensure_ascii=False), pending_query),
+                           profile = excluded.profile, last_query = excluded.last_query""",
+                    (_encoded_key(key), json.dumps(profile, ensure_ascii=False), last_query),
                 )
 
     def close(self) -> None:

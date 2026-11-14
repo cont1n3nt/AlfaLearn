@@ -43,17 +43,28 @@ def test_telegram_preserves_profile_and_clarification_until_reset(tmp_path):
         service = AsyncMock()
         service.answer.side_effect = [
             AIResponse("clarify", "Какую задачу решаем?", "1", profile_patch=LearningProfile(industry="cafe")),
-            AIResponse("no_answer", "Пока нет сведений.", "2"),
+            AIResponse(
+                "answer", "Совет [S1]", "2",
+                (Source("S1", "article:demo", "chunk", "Сервис", (1,), "https://example.org/article"),),
+            ),
             AIResponse("no_answer", "Пока нет сведений.", "3"),
+            AIResponse("no_answer", "Пока нет сведений.", "4"),
         ]
         store = ConversationStore(tmp_path / "conversations.sqlite3")
-        dispatcher = create_dispatcher(ai=service, memory=store)
+        dispatcher = create_dispatcher(group_delay_seconds=0.01, ai=service, memory=store)
         buffer = dispatcher["answer_buffer"]
         async with Bot(token="123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi") as bot:
             session = bot.session
             bot.session = AsyncMock()
             try:
-                for number, text in enumerate(("У меня кофейня", "Как вернуть клиентов?", "/reset", "А как начать?"), 1):
+                messages = (
+                    "У меня кофейня",
+                    "Как вернуть клиентов?",
+                    "А в моём случае?",
+                    "/reset",
+                    "А как начать?",
+                )
+                for number, text in enumerate(messages, 1):
                     message = Message(
                         message_id=number,
                         date=datetime.now(timezone.utc),
@@ -64,11 +75,13 @@ def test_telegram_preserves_profile_and_clarification_until_reset(tmp_path):
                     await dispatcher.feed_update(bot, Update(update_id=number, message=message))
                     await buffer.wait_idle()
                 requests = [call.args[0] for call in service.answer.await_args_list]
-                assert len(requests) == 3
+                assert len(requests) == 4
                 assert requests[1].profile.industry == "cafe"
                 assert requests[1].previous_query == "У меня кофейня"
-                assert requests[2].profile.industry is None
-                assert requests[2].previous_query is None
+                assert requests[2].profile.industry == "cafe"
+                assert requests[2].previous_query == "Как вернуть клиентов?"
+                assert requests[3].profile.industry is None
+                assert requests[3].previous_query is None
                 assert "Какую задачу решаем?" == bot.session.call_args_list[0].args[1].text
             finally:
                 await buffer.close()

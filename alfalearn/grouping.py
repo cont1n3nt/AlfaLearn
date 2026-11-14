@@ -194,7 +194,7 @@ class AnswerBuffer:
             return
         text = "\n\n".join(group.texts)
         use_llm = bool(text) and not group.has_command and group.kinds <= TEXT_KINDS and not group.overflow
-        ready = use_llm and (self.ai is not None or is_clear_question(text))
+        ready = use_llm and is_clear_question(text)
         history: list[dict] = []
         context_error = False
         if use_llm and self.ai is None and self.context is not None:
@@ -202,7 +202,7 @@ class AnswerBuffer:
                 history = await self.context.prepare(key, group.history_ids, text, is_current)
             except OllamaError:
                 context_error = True
-        if use_llm and not ready and self.llm is not None:
+        if use_llm and not ready and self.ai is None and self.llm is not None:
             try:
                 if not context_error:
                     decision = await asyncio.wait_for(
@@ -222,7 +222,7 @@ class AnswerBuffer:
                 await asyncio.sleep(remaining)
         if not is_current():
             return
-        if use_llm and self.llm is not None and not ready:
+        if use_llm and self.ai is None and self.llm is not None and not ready:
             # A pause is not permission to answer. The original text is already
             # durable and will accompany a later question, even after restart.
             self.pending.pop(key)
@@ -246,12 +246,8 @@ class AnswerBuffer:
                 if record_answer:
                     if response.profile_patch is not None:
                         profile.update(response.to_dict()["profile_patch"])
-                    pending_query = (
-                        text.strip()
-                        if response.status == "clarify" and response.proposed_action is None
-                        else None
-                    )
-                    consultation = profile, pending_query
+                    last_query = text.strip() if response.proposed_action is None else previous_query
+                    consultation = profile, last_query
         elif use_llm and self.llm is not None:
             try:
                 if context_error:
@@ -292,7 +288,9 @@ class AnswerBuffer:
     async def wait_idle(self) -> None:
         """Wait for current groups, ignoring superseded tasks' cancellations."""
         while self.tasks:
-            results = await asyncio.gather(*tuple(self.tasks), return_exceptions=True)
+            tasks = tuple(self.tasks)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            self.tasks.difference_update(tasks)
             for result in results:
                 if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
                     raise result
