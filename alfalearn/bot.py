@@ -5,9 +5,11 @@ from aiogram.types import Message
 from alfa_ai import AIService
 from alfalearn.accounts.bot import create_accounts_router
 from alfalearn.accounts.service import AccountService
+from alfalearn.calculator_menu import create_calculator_router
 from alfalearn.grouping import AnswerBuffer
 from alfalearn.llm import OllamaClient
 from alfalearn.memory import ConversationStore
+from alfalearn.vat_bot import create_vat_router
 
 # HTTP GET /hello keeps the connectivity check answer.
 HELLO_MESSAGE = "Hello, world!"
@@ -46,7 +48,8 @@ def help_message(*, accounts: bool) -> str:
     return (
         "Доступные команды:\n"
         + (ACCOUNT_COMMANDS if accounts else "")
-        + "/reset — очистить историю диалога\n"
+        + "/calc — калькуляторы Альфа-Курса\n"
+        "/reset — очистить историю диалога\n"
         "/help — показать этот список"
     )
 
@@ -92,5 +95,7 @@ def create_dispatcher(
     if accounts is not None:
         # Before the catch-all: login steps and passwords must not reach the answers buffer.
         dispatcher.include_router(create_accounts_router(accounts))
+    dispatcher.include_router(create_calculator_router())
+    dispatcher.include_router(create_vat_router())
     dispatcher.include_router(router)
     return dispatcher

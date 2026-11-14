@@ -5,6 +5,7 @@ import asyncio
 from aiogram import Bot
 from aiogram.types import BotCommand
 
+from alfalearn.calculator_cards import CARDS
 from alfalearn.config import Settings
 
 
@@ -17,7 +18,7 @@ async def main() -> None:
         await bot.set_my_description(
             description=(
                 "АльфаНавигатор — прототип помощника по обучающим материалам Альфа-Курса. "
-                "Создан для хакатона. Помогает разобраться, какие курсы вам доступны. Все команды — /help."
+                "Помогает подобрать материалы и найти калькуляторы Альфа-Курса. Все команды — /help."
             )
         )
         await bot.set_my_short_description(
@@ -27,6 +28,8 @@ async def main() -> None:
             BotCommand(command="start", description="Знакомство с АльфаНавигатором"),
             BotCommand(command="hello", description="Приветствие: что умеет бот"),
             BotCommand(command="help", description="Доступные команды"),
+            BotCommand(command="calc", description="Все калькуляторы Альфа-Курса"),
+            *[BotCommand(command=card.command, description=card.title) for card in CARDS],
             BotCommand(command="reset", description="Очистить историю этого диалога"),
             BotCommand(command="login", description="Войти в демо-аккаунт"),
             BotCommand(command="profile", description="Мой доступ к платным курсам"),
