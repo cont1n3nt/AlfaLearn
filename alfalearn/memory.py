@@ -57,6 +57,11 @@ class ConversationStore:
                     content TEXT NOT NULL,
                     through_id INTEGER NOT NULL CHECK(through_id >= 0)
                 );
+                CREATE TABLE IF NOT EXISTS conversation_consultation (
+                    conversation_key TEXT PRIMARY KEY,
+                    profile TEXT NOT NULL,
+                    pending_query TEXT
+                );
             """)
         except BaseException:
             self._connection.close()
@@ -168,6 +173,30 @@ class ConversationStore:
                 )
                 connection.execute(
                     "DELETE FROM conversation_summaries WHERE conversation_key = ?", (encoded,),
+                )
+                connection.execute(
+                    "DELETE FROM conversation_consultation WHERE conversation_key = ?", (encoded,),
+                )
+
+    def consultation(self, key: ConversationKey) -> tuple[dict, str | None]:
+        with self._lock:
+            row = self._db().execute(
+                "SELECT profile, pending_query FROM conversation_consultation WHERE conversation_key = ?",
+                (_encoded_key(key),),
+            ).fetchone()
+        return (json.loads(row[0]), row[1]) if row else ({}, None)
+
+    def save_consultation(
+        self, key: ConversationKey, profile: dict, pending_query: str | None,
+    ) -> None:
+        with self._lock:
+            connection = self._db()
+            with connection:
+                connection.execute(
+                    """INSERT INTO conversation_consultation (conversation_key, profile, pending_query)
+                       VALUES (?, ?, ?) ON CONFLICT(conversation_key) DO UPDATE SET
+                           profile = excluded.profile, pending_query = excluded.pending_query""",
+                    (_encoded_key(key), json.dumps(profile, ensure_ascii=False), pending_query),
                 )
 
     def close(self) -> None:

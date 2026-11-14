@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from alfa_ai import AIRequest, AIService
 from alfalearn.accounts.api import create_accounts_router
 from alfalearn.accounts.service import AccountService
 from alfalearn.accounts.store import AccountStore
@@ -14,6 +15,7 @@ from alfalearn.answers import KIND_LABELS, MessageKind, build_answer
 from alfalearn.bot import HELLO_MESSAGE, create_dispatcher
 from alfalearn.config import Settings
 from alfalearn.grouping import OLLAMA_UNAVAILABLE
+from alfalearn.knowledge import TOO_LONG, format_answer
 from alfalearn.llm import OllamaClient, OllamaError
 from alfalearn.memory import ConversationStore
 
@@ -67,14 +69,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if webhook.url:
                 raise RuntimeError("Bot has an active webhook. Use a bot configured for polling.")
             app.state.bot_username = me.username
-            if settings.ollama_enabled:
-                app.state.memory = ConversationStore(settings.history_path)
             dispatcher = create_dispatcher(
                 settings.group_delay_seconds,
                 llm=app.state.llm,
                 classification_timeout_seconds=settings.classification_timeout_seconds,
                 memory=app.state.memory, history_context_chars=settings.history_context_chars,
                 accounts=app.state.accounts,
+                ai=app.state.ai,
             )
             task = asyncio.create_task(
                 dispatcher.start_polling(
@@ -108,20 +109,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.llm = None
         app.state.memory = None
         app.state.accounts = None
-        if settings.demo_users_enabled:
-            # Creates the database and the three demo users on the first start.
-            app.state.accounts = AccountService(AccountStore(settings.accounts_path))
-            app.state.accounts.seed_demo()
-        if settings.ollama_enabled:
-            key = settings.ollama_api_key.get_secret_value() if settings.ollama_api_key else None
-            if settings.ollama_base_url.host == "ollama.com" and not key:
-                raise RuntimeError("Set OLLAMA_API_KEY in .env for Ollama Cloud.")
-            app.state.llm = OllamaClient(
-                base_url=str(settings.ollama_base_url), model=settings.ollama_model,
-                api_key=key, timeout_seconds=settings.ollama_timeout_seconds,
-                max_concurrency=settings.ollama_max_concurrency,
-            )
+        app.state.ai = None
         try:
+            if settings.demo_users_enabled:
+                app.state.accounts = AccountService(AccountStore(settings.accounts_path))
+                app.state.accounts.seed_demo()
+            if settings.ai_enabled:
+                app.state.ai = await AIService.create(settings.ai_settings())
+            elif settings.ollama_enabled:
+                key = settings.ollama_api_key.get_secret_value() if settings.ollama_api_key else None
+                if settings.ollama_base_url.host == "ollama.com" and not key:
+                    raise RuntimeError("Set OLLAMA_API_KEY in .env for Ollama Cloud.")
+                app.state.llm = OllamaClient(
+                    base_url=str(settings.ollama_base_url), model=settings.ollama_model,
+                    api_key=key, timeout_seconds=settings.ollama_timeout_seconds,
+                    max_concurrency=settings.ollama_max_concurrency,
+                )
+            if settings.bot_enabled and (app.state.ai is not None or app.state.llm is not None):
+                app.state.memory = ConversationStore(settings.history_path)
             async with telegram_lifespan(app):
                 yield
         finally:
@@ -131,6 +136,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.accounts.store.close()
             if app.state.llm is not None:
                 await app.state.llm.close()
+            if app.state.ai is not None:
+                await app.state.ai.aclose()
 
     app = FastAPI(title="AlfaLearn microbot", version="0.1.0", lifespan=lifespan)
 
@@ -141,7 +148,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/answers", tags=["Ответы"], response_model=AnswerResponse)
     async def answer(request: AnswerRequest) -> AnswerResponse | JSONResponse:
-        """Ответ Ollama (если включена) или заглушка в режиме без LLM."""
+        """Ответ по базе знаний, ответ Ollama или заглушка."""
+        if app.state.ai is not None:
+            if len(request.message) > 1000:
+                return JSONResponse(status_code=422, content={"answer": TOO_LONG})
+            response = await app.state.ai.answer(AIRequest(query=request.message))
+            if response.status == "error":
+                return JSONResponse(status_code=503, content={"answer": response.text})
+            return AnswerResponse(answer=format_answer(response))
         if app.state.llm is not None:
             try:
                 return AnswerResponse(answer=await app.state.llm.answer(request.message))
@@ -175,7 +189,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "bot": "polling" if running else "stopped" if settings.bot_enabled else "disabled",
             "username": app.state.bot_username,
         }
-        if settings.ollama_enabled:
+        if settings.ai_enabled:
+            content["llm"] = {"provider": "alfa_ai", "model": settings.ai_model}
+        elif settings.ollama_enabled:
             # Configuration only: this endpoint does not make paid model calls.
             content["llm"] = {"provider": "ollama", "model": settings.ollama_model}
         return JSONResponse(

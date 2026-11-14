@@ -9,24 +9,23 @@ Telegram-бот для кейса «Альфа-Курс»: тестовый по
 
 Название проекта: **АльфаНавигатор**. Фактический Telegram username определяется
 токеном `BOT_TOKEN` и отображается в `/health`.
-Материалы курса и поиск по ним (RAG), профиль и напоминания ещё не подключены.
+При `AI_ENABLED=true` бот отвечает по проверенным материалам, показывает источники и рекомендации
+и сохраняет профиль консультации в SQLite. Настройка и отправка напоминаний пока недоступны.
 
 ## Запуск на Windows
 
-Для проекта используется Python 3.11 и доступ к Telegram API. Версия закреплена
-в `.python-version`. Команды ниже создают окружение на Python 3.11. Из корня проекта:
+Для проекта используется Python 3.12 и uv. Для Telegram требуется токен бота.
 
 ```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
+uv sync --locked --group bot-runtime
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
 Укажи токен BotFather в `BOT_TOKEN` в `.env`. В текущем рабочем проекте `.env`
 уже заполнен — не перезаписывай его примером.
 
 ```powershell
-.\.venv\Scripts\python.exe -m alfalearn
+uv run --locked --group bot-runtime python -m alfalearn
 ```
 
 Один процесс запускает FastAPI и Telegram long polling. Публичный домен,
@@ -483,11 +482,10 @@ tests/
   test_accounts.py # демо-юзеры: доступы, вход и выход через бот и API
   conftest.py   # временная база демо-юзеров для тестов
 .env.example         # шаблон настроек без токена
-.python-version      # версия Python для проекта: 3.11
+.python-version      # версия Python для проекта
 .gitignore           # исключает секреты, окружение, кэши и локальные данные
-requirements.txt     # основные зависимости с фиксированными версиями
-requirements-dev.txt # основные зависимости и инструменты тестирования
-requirements.lock    # полный снимок зависимостей проверенного окружения
+pyproject.toml       # группы зависимостей бота и AI/ML
+uv.lock              # фиксированные версии зависимостей
 README.md            # описание, запуск, структура и примеры запросов
 ```
 
@@ -519,7 +517,7 @@ SQLite используется для диалоговой истории; по
 ## Проверки
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+uv sync --locked --group bot --group corpus
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
@@ -535,13 +533,18 @@ SQLite используется для диалоговой истории; по
 .\.venv\Scripts\python.exe -m scripts.configure_bot
 ```
 
-Основные зависимости зафиксированы в `requirements.txt`; полный снимок
-проверенного окружения, включая тестовые зависимости, — `requirements.lock`.
-Для его воспроизведения: `python -m pip install -r requirements.lock`.
+Версии зависимостей зафиксированы в `uv.lock`.
 
 Документация: [aiogram polling](https://docs.aiogram.dev/en/latest/dispatcher/long_polling.html),
 [FastAPI lifespan](https://fastapi.tiangolo.com/advanced/events/).
 
 ## AI/ML
 
-См. [контракт AI-модуля](docs/ai/INTEGRATION.md) и [локальную приёмку](docs/ai/LOCAL_ACCEPTANCE.md).
+Укажи в `.env` `AI_ENABLED=true`, `AI_CORPUS_PATH` и адрес запущенной локальной Ollama в
+`AI_OLLAMA_URL`. Имя и digest модели перечислены в `.env.example`. В этом режиме
+`POST /answers` и текстовые запросы Telegram используют общий сервис AI/ML.
+Для проверки HTTP без токена установи `BOT_ENABLED=false`. Для E5 установи дополнительную
+группу командой `uv sync --locked --group bot-runtime --extra semantic`.
+
+См. [контракт AI-модуля](docs/ai/INTEGRATION.md), [подключение подкастов](docs/ai/PODCASTS.md)
+и [локальную приёмку](docs/ai/LOCAL_ACCEPTANCE.md).

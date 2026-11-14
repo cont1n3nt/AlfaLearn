@@ -3,6 +3,8 @@ from pathlib import Path
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from alfa_ai.settings import DEFAULT_DIGEST, DEFAULT_MODEL, Settings as AISettings
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -30,12 +32,49 @@ class Settings(BaseSettings):
     ollama_max_concurrency: int = Field(default=4, ge=1, le=16)
     demo_users_enabled: bool = True
     accounts_path: Path = PROJECT_ROOT / ".run" / "accounts.sqlite3"
+    ai_enabled: bool = False
+    ai_corpus_path: Path = PROJECT_ROOT / "data" / "local" / "pilot_chunks.jsonl"
+    ai_ollama_url: str = "http://127.0.0.1:11434"
+    ai_model: str = DEFAULT_MODEL
+    ai_model_digest: str = DEFAULT_DIGEST
+    ai_request_timeout: float = 60
+    ai_http_timeout: float = 45
+    ai_max_workers: int = 1
+    ai_max_pending: int = 4
+    ai_podcast_corpus_path: Path | None = None
+    ai_podcast_corpus_sha256: str | None = None
+    ai_e5_model_dir: Path | None = None
 
-    @field_validator("history_path", "accounts_path")
+    def ai_settings(self) -> AISettings:
+        return AISettings(
+            corpus_path=self.ai_corpus_path,
+            ollama_url=self.ai_ollama_url,
+            model=self.ai_model,
+            model_digest=self.ai_model_digest,
+            request_timeout=self.ai_request_timeout,
+            http_timeout=self.ai_http_timeout,
+            max_workers=self.ai_max_workers,
+            max_pending=self.ai_max_pending,
+            podcast_corpus_path=self.ai_podcast_corpus_path,
+            podcast_corpus_sha256=self.ai_podcast_corpus_sha256,
+            e5_model_dir=self.ai_e5_model_dir,
+        )
+
+    @field_validator(
+        "history_path", "accounts_path", "ai_corpus_path", "ai_podcast_corpus_path", "ai_e5_model_dir",
+        mode="before",
+    )
     @classmethod
-    def resolve_history_path(cls, value: Path) -> Path:
-        value = value.expanduser()
-        return value if value.is_absolute() else PROJECT_ROOT / value
+    def resolve_project_path(cls, value):
+        if value is None or value == "":
+            return None
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    @field_validator("ai_podcast_corpus_sha256", mode="before")
+    @classmethod
+    def empty_digest(cls, value):
+        return value or None
 
     @field_validator("ollama_base_url")
     @classmethod

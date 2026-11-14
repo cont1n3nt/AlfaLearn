@@ -2,6 +2,7 @@ from aiogram import Dispatcher, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 
+from alfa_ai import AIService
 from alfalearn.accounts.bot import create_accounts_router
 from alfalearn.accounts.service import AccountService
 from alfalearn.grouping import AnswerBuffer
@@ -55,14 +56,15 @@ def create_dispatcher(
     *, llm: OllamaClient | None = None, classification_timeout_seconds: float = 0.8,
     memory: ConversationStore | None = None, history_context_chars: int = 12_000,
     accounts: AccountService | None = None,
+    ai: AIService | None = None,
 ) -> Dispatcher:
     router = Router(name="answers")
     buffer = AnswerBuffer(
         group_delay_seconds, llm=llm,
         classification_timeout_seconds=classification_timeout_seconds,
-        memory=memory, history_context_chars=history_context_chars,
+        memory=memory, history_context_chars=history_context_chars, ai=ai,
     )
-    greeting = greeting_message(llm=llm is not None, accounts=accounts is not None)
+    greeting = greeting_message(llm=ai is not None or llm is not None, accounts=accounts is not None)
     help_text = help_message(accounts=accounts is not None)
 
     @router.message(CommandStart())

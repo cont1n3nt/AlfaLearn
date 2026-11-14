@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 
 from aiogram.types import Message
 
+from alfa_ai import AIRequest, AIService, LearningProfile
 from alfalearn.answers import MessageKind, build_answer, classify_message
+from alfalearn.knowledge import TOO_LONG, format_answer
 from alfalearn.llm import OllamaClient, OllamaError
 from alfalearn.conversation import DialogueContext
 from alfalearn.memory import ConversationStore
@@ -92,6 +94,7 @@ class AnswerBuffer:
         self, delay_seconds: float = 1.0, *, llm: OllamaClient | None = None,
         classification_timeout_seconds: float = 0.8,
         memory: ConversationStore | None = None, history_context_chars: int = 12_000,
+        ai: AIService | None = None,
     ):
         if delay_seconds <= 0:
             raise ValueError("Grouping delay must be positive")
@@ -99,6 +102,7 @@ class AnswerBuffer:
             raise ValueError("Classification timeout must be positive")
         self.delay_seconds = delay_seconds
         self.llm = llm
+        self.ai = ai
         self.classification_timeout_seconds = classification_timeout_seconds
         self.store = memory if memory is not None else ConversationStore()
         self._owns_store = memory is None
@@ -136,7 +140,7 @@ class AnswerBuffer:
         kinds = classify_message(message, bot_id=message.bot.id)
         history_id = None
         if (
-            self.llm is not None and message.text and command_answer is None
+            (self.llm is not None or self.ai is not None) and message.text and command_answer is None
             and not message.text.startswith("/") and kinds <= TEXT_KINDS
         ):
             history_id = self.store.append_user(key, message.text, message.message_id)
@@ -190,10 +194,10 @@ class AnswerBuffer:
             return
         text = "\n\n".join(group.texts)
         use_llm = bool(text) and not group.has_command and group.kinds <= TEXT_KINDS and not group.overflow
-        ready = use_llm and is_clear_question(text)
+        ready = use_llm and (self.ai is not None or is_clear_question(text))
         history: list[dict] = []
         context_error = False
-        if use_llm and self.context is not None:
+        if use_llm and self.ai is None and self.context is not None:
             try:
                 history = await self.context.prepare(key, group.history_ids, text, is_current)
             except OllamaError:
@@ -224,10 +228,30 @@ class AnswerBuffer:
             self.pending.pop(key)
             return
         record_answer = False
+        consultation = None
         if group.overflow:
             answer = GROUP_TOO_LONG
         elif group.count == 1 and group.command_answer:
             answer = group.command_answer
+        elif use_llm and self.ai is not None:
+            if len(text.strip()) > 1000:
+                answer = TOO_LONG
+            else:
+                profile, previous_query = self.store.consultation(key)
+                response = await self.ai.answer(
+                    AIRequest(query=text, profile=LearningProfile(**profile), previous_query=previous_query)
+                )
+                answer = format_answer(response)
+                record_answer = response.status != "error"
+                if record_answer:
+                    if response.profile_patch is not None:
+                        profile.update(response.to_dict()["profile_patch"])
+                    pending_query = (
+                        text.strip()
+                        if response.status == "clarify" and response.proposed_action is None
+                        else None
+                    )
+                    consultation = profile, pending_query
         elif use_llm and self.llm is not None:
             try:
                 if context_error:
@@ -249,6 +273,8 @@ class AnswerBuffer:
                 return
             if record_answer and self.epochs.get(key, 0) == group.epoch:
                 self.store.append_assistant(key, chunk)
+        if consultation is not None:
+            self.store.save_consultation(key, *consultation)
 
     def _key_task_done(self, key: GroupKey, task: asyncio.Task) -> None:
         tasks = self.key_tasks.get(key)
