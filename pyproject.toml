@@ -14,6 +14,15 @@ semantic = ["onnxruntime==1.23.2", "tokenizers==0.22.2"]
 
 [dependency-groups]
 asr = ["av==16.1.0", "faster-whisper==1.2.1"]
+bot = [{ include-group = "bot-runtime" }, { include-group = "bot-test" }]
+bot-runtime = [
+    "aiogram==3.31.0",
+    "aiohttp==3.14.5",
+    "fastapi==0.162.4",
+    "pydantic-settings==2.16.2",
+    "uvicorn==0.54.0",
+]
+bot-test = ["httpx==0.28.1", "pytest==9.2.0"]
 corpus = ["beautifulsoup4==4.15.0", "huggingface-hub==0.36.0", "psycopg[binary]==3.3.8", "tokenizers==0.22.2"]
 lint = ["ruff==0.14.14"]
 
