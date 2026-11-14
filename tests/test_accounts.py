@@ -242,6 +242,7 @@ def test_greeting_and_help_list_account_commands(service):
             "/login — войти в демо-аккаунт (anna, boris, vera)\n"
             "/profile — мой доступ к платным курсам\n"
             "/logout — выйти из аккаунта\n"
+            "/calc — калькуляторы Альфа-Курса\n"
             "/reset — очистить историю диалога\n"
             "/help — показать этот список"
         )
