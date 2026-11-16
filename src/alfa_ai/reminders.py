@@ -30,8 +30,13 @@ ONCE = r"\b(?:один\s+раз|разово)\b"
 WEEKDAY_NAMES = "|".join(day for forms in WEEKDAYS for day in forms)
 WEEKLY = rf"\b(?:кажд(?:ый|ую|ое)|по)\s+({WEEKDAY_NAMES})\b"
 OTHER_REPEAT = r"\b(?:еженедельно|ежемесячно|по\s+будням|раз\s+в|кажд\w*)\b"
-RELATIVE_OFFSET = re.compile(
-    rf"\b(?:через\s+\d|за\s+\d+\s+(?:минут|час|дн|ден)|(?:до|после)\s+{TIME})", re.I
+RELATIVE_DELAY = re.compile(
+    r"\bчерез\s+(\d{1,4})\s+"
+    r"(мин(?:ут(?:у|ы)?|ут)?|час(?:а|ов)?|д(?:ень|ня|ней))\b",
+    re.I,
+)
+UNSUPPORTED_RELATIVE = re.compile(
+    rf"\b(?:за\s+\d+\s+(?:минут|час|дн|ден)|(?:до|после)\s+{TIME})", re.I
 )
 QUESTIONS = {
     "reminder_id": "Укажите номер напоминания в формате #номер.",
@@ -60,6 +65,20 @@ def unambiguous_time(value, zone, now):
         if instant.astimezone(zone).replace(tzinfo=None) == value:
             valid.add(instant)
     return len(valid) == 1 and next(iter(valid)) > now
+
+
+def relative_delta(match):
+    amount = int(match[1])
+    if amount < 1:
+        return None
+    unit = match[2].casefold()
+    if unit.startswith("мин") and amount <= 10_080:
+        return timedelta(minutes=amount)
+    if unit.startswith("час") and amount <= 168:
+        return timedelta(hours=amount)
+    if unit.startswith("д") and amount <= 365:
+        return timedelta(days=amount)
+    return None
 
 
 def plan_reminder(request):
@@ -120,12 +139,22 @@ def plan_reminder(request):
 
     dates = re.findall(DATE, lower)
     times = re.findall(TIME, lower)
+    relative_matches = list(RELATIVE_DELAY.finditer(lower))
+    relative = relative_matches[0] if len(relative_matches) == 1 else None
+    invalid_relative = (
+        len(relative_matches) > 1
+        or bool(UNSUPPORTED_RELATIVE.search(lower))
+        or (relative is not None and relative_delta(relative) is None)
+        or (relative is not None and (dates or times or verb or repeat != "once"))
+    )
+    if invalid_relative:
+        relative = None
     zones = re.findall(ZONE, body)
     zone_name = zones[0] if len(zones) == 1 else request.timezone if not zones else None
     subject = None
     if not verb:
         subject = re.sub(
-            rf"(?:\b(?:в|на)\s+)?(?:{DATE}|{TIME}|{ZONE}|{WEEKLY}|{DAILY}|{ONCE})",
+            rf"(?:\b(?:в|на)\s+)?(?:{DATE}|{TIME}|{ZONE}|{WEEKLY}|{DAILY}|{ONCE}|{RELATIVE_DELAY.pattern})",
             " ",
             body,
             flags=re.I,
@@ -136,7 +165,7 @@ def plan_reminder(request):
             missing.append("subject")
 
     local_datetime = None
-    if not verb or dates or times:
+    if not verb or dates or times or relative:
         now = (request.now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         try:
             zone = ZoneInfo(zone_name) if zone_name else None
@@ -145,46 +174,59 @@ def plan_reminder(request):
         if zone is None:
             zone_name = None
             missing.append("timezone")
-        try:
-            at = time(*map(int, times[0].split(":"))) if len(times) == 1 else None
-        except ValueError:
-            at = None
-        if at is None or RELATIVE_OFFSET.search(body):
-            missing.append("time")
-            at = None
         local_now = now.astimezone(zone) if zone else None
-        target = None
-        if len(dates) == 1:
-            token = dates[0]
-            relative = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
-            if token in relative:
-                if local_now:
-                    target = local_now.date() + timedelta(days=relative[token])
-            else:
-                try:
-                    target = (
-                        date.fromisoformat(token)
-                        if "-" in token
-                        else datetime.strptime(token, "%d.%m.%Y").date()
-                    )
-                except ValueError:
-                    missing.append("date")
-        elif not dates and repeat in {"daily", "weekly"}:
-            if local_now and at:
-                target = next_date(local_now, at, weekday)
+        if relative is not None:
+            if zone:
+                value = (now + relative_delta(relative)).astimezone(zone).replace(tzinfo=None)
+                if value.second or value.microsecond:
+                    value = (value + timedelta(minutes=1)).replace(second=0, microsecond=0)
+                if unambiguous_time(value, zone, now):
+                    local_datetime = value.isoformat(timespec="minutes")
+                else:
+                    missing.append("time")
         else:
-            missing.append("date")
-        if target and weekday is not None and target.weekday() != weekday:
-            missing.append("date")
-            target = None
-        if zone and target and at:
-            value = datetime.combine(target, at)
-            if unambiguous_time(value, zone, now):
-                local_datetime = value.isoformat(timespec="minutes")
-            else:
+            try:
+                at = time(*map(int, times[0].split(":"))) if len(times) == 1 else None
+            except ValueError:
+                at = None
+            if at is None:
                 missing.append("time")
+                at = None
+            target = None
+            if len(dates) == 1:
+                token = dates[0]
+                relative_dates = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
+                if token in relative_dates:
+                    if local_now:
+                        target = local_now.date() + timedelta(days=relative_dates[token])
+                else:
+                    try:
+                        target = (
+                            date.fromisoformat(token)
+                            if "-" in token
+                            else datetime.strptime(token, "%d.%m.%Y").date()
+                        )
+                    except ValueError:
+                        missing.append("date")
+            elif not dates and repeat in {"daily", "weekly"}:
+                if local_now and at:
+                    target = next_date(local_now, at, weekday)
+            else:
+                missing.append("date")
+            if target and weekday is not None and target.weekday() != weekday:
+                missing.append("date")
+                target = None
+            if zone and target and at:
+                value = datetime.combine(target, at)
+                if unambiguous_time(value, zone, now):
+                    local_datetime = value.isoformat(timespec="minutes")
+                else:
+                    missing.append("time")
     elif repeat is None and "repeat" not in missing:
         missing.append("change")
+    if invalid_relative:
+        local_datetime = None
+        missing.append("time")
 
     proposal = ReminderProposal(
         action,

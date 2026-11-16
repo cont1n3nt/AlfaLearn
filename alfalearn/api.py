@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from alfa_ai import AIRequest, AIService
 from alfalearn.accounts.api import create_accounts_router
+from alfalearn.analytics import EventStore
 from alfalearn.accounts.service import AccountService
 from alfalearn.accounts.store import AccountStore
 from alfalearn.answers import KIND_LABELS, MessageKind, build_answer
@@ -18,6 +19,7 @@ from alfalearn.grouping import OLLAMA_UNAVAILABLE
 from alfalearn.knowledge import TOO_LONG, format_answer
 from alfalearn.llm import OllamaClient, OllamaError
 from alfalearn.memory import ConversationStore
+from alfalearn.reminder_runtime import ReminderDialogue, ReminderStore, ReminderWorker
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def telegram_lifespan(app: FastAPI):
         app.state.polling_task = None
+        app.state.reminder_task = None
         app.state.bot_username = None
         if not settings.bot_enabled:
             yield
@@ -69,6 +72,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if webhook.url:
                 raise RuntimeError("Bot has an active webhook. Use a bot configured for polling.")
             app.state.bot_username = me.username
+            reminders = (
+                ReminderDialogue(app.state.reminder_store)
+                if app.state.reminder_store is not None else None
+            )
             dispatcher = create_dispatcher(
                 settings.group_delay_seconds,
                 llm=app.state.llm,
@@ -76,7 +83,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 memory=app.state.memory, history_context_chars=settings.history_context_chars,
                 accounts=app.state.accounts,
                 ai=app.state.ai,
+                reminders=reminders,
+                analytics=app.state.analytics,
             )
+            if app.state.reminder_store is not None:
+                async def send_reminder(row):
+                    await bot.send_message(
+                        row["chat_id"], f"🔔 Напоминание #{row['id']}: {row['subject']}",
+                        message_thread_id=row["thread_id"],
+                    )
+
+                worker = ReminderWorker(app.state.reminder_store, send_reminder)
+                app.state.reminder_task = asyncio.create_task(
+                    worker.run(), name="telegram-reminders",
+                )
             task = asyncio.create_task(
                 dispatcher.start_polling(
                     bot,
@@ -97,6 +117,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 yield
             finally:
+                if app.state.reminder_task is not None:
+                    app.state.reminder_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await app.state.reminder_task
                 task.cancel()
                 try:
                     with suppress(asyncio.CancelledError):
@@ -110,6 +134,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.memory = None
         app.state.accounts = None
         app.state.ai = None
+        app.state.reminder_store = None
+        app.state.analytics = None
         try:
             if settings.demo_users_enabled:
                 app.state.accounts = AccountService(AccountStore(settings.accounts_path))
@@ -127,11 +153,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             if settings.bot_enabled and (app.state.ai is not None or app.state.llm is not None):
                 app.state.memory = ConversationStore(settings.history_path)
+            if settings.bot_enabled and app.state.ai is not None:
+                app.state.reminder_store = ReminderStore(settings.reminders_path)
+                app.state.analytics = EventStore(settings.analytics_path, settings.analytics_retention_days)
             async with telegram_lifespan(app):
                 yield
         finally:
             if app.state.memory is not None:
                 app.state.memory.close()
+            if app.state.reminder_store is not None:
+                app.state.reminder_store.close()
+            if app.state.analytics is not None:
+                app.state.analytics.close()
             if app.state.accounts is not None:
                 app.state.accounts.store.close()
             if app.state.llm is not None:
@@ -183,9 +216,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> JSONResponse:
         task = app.state.polling_task
         running = task is not None and not task.done()
-        healthy = not settings.bot_enabled or running
         content = {
-            "status": "ok" if healthy else "degraded",
+            "status": "ok",
             "bot": "polling" if running else "stopped" if settings.bot_enabled else "disabled",
             "username": app.state.bot_username,
         }
@@ -195,8 +227,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # Configuration only: this endpoint does not make paid model calls.
             content["llm"] = {"provider": "ollama", "model": settings.ollama_model}
         return JSONResponse(
-            status_code=200 if healthy else 503,
+            status_code=200,
             content=content,
+        )
+
+    @app.get("/ready")
+    async def ready() -> JSONResponse:
+        task = app.state.polling_task
+        bot_ready = not settings.bot_enabled or (task is not None and not task.done())
+        reminder_task = app.state.reminder_task
+        reminders_ready = app.state.reminder_store is None or (
+            reminder_task is not None and not reminder_task.done()
+        )
+        model_ready = (
+            await app.state.ai.readiness() if app.state.ai is not None else True
+        )
+        healthy = bot_ready and reminders_ready and model_ready
+        return JSONResponse(
+            status_code=200 if healthy else 503,
+            content={
+                "status": "ready" if healthy else "unavailable",
+                "bot": bot_ready,
+                "reminders": reminders_ready,
+                "model": model_ready,
+            },
         )
 
     return app

@@ -1,0 +1,91 @@
+services:
+  ollama:
+    image: ollama/ollama:0.40.16
+    restart: unless-stopped
+    gpus: all
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NO_CLOUD: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_KEEP_ALIVE: "-1"
+    volumes:
+      - ollama-models:/root/.ollama
+      - model-files:/models:ro
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  model-fetch:
+    build: .
+    command: ["python", "-m", "scripts.fetch_model"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - model-files:/models
+
+  model-create:
+    image: ollama/ollama:0.40.16
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - "if test -f /models/model.gguf; then ollama create qwen35-unc-local:latest -f /model/Modelfile && rm /models/model.gguf; else ollama show qwen35-unc-local:latest >/dev/null; fi"
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - model-files:/models
+      - ./config/Modelfile.docker:/model/Modelfile:ro
+    depends_on:
+      model-fetch:
+        condition: service_completed_successfully
+
+  model-warm:
+    build: .
+    command: ["python", "-m", "scripts.warm_model"]
+    environment:
+      AI_OLLAMA_URL: http://ollama:11434
+      AI_OLLAMA_INTERNAL_HOST: ollama
+      AI_MODEL: qwen35-unc-local:latest
+      AI_MODEL_DIGEST: cd68126d1fec3ada81728c06f6649901d5ca209ac7662641bc1f5dd581947c96
+      AI_HTTP_TIMEOUT: "180"
+    depends_on:
+      model-create:
+        condition: service_completed_successfully
+
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    depends_on:
+      model-warm:
+        condition: service_completed_successfully
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      BOT_ENABLED: "true"
+      DEMO_USERS_ENABLED: "false"
+      HOST: 0.0.0.0
+      PORT: "8000"
+      HISTORY_PATH: /app/.run/conversations.sqlite3
+      REMINDERS_PATH: /app/.run/reminders.sqlite3
+      AI_ENABLED: "true"
+      AI_CORPUS_PATH: /app/assets/reviewed_articles.jsonl
+      AI_PODCAST_CORPUS_PATH: /app/assets/reviewed_podcasts.json
+      AI_PODCAST_CORPUS_SHA256: 3df378f54466076cb9a317b62e7385074161046e9a04e50271d32c9ec7ad106c
+      AI_OLLAMA_URL: http://ollama:11434
+      AI_OLLAMA_INTERNAL_HOST: ollama
+      AI_MODEL: qwen35-unc-local:latest
+      AI_MODEL_DIGEST: cd68126d1fec3ada81728c06f6649901d5ca209ac7662641bc1f5dd581947c96
+      AI_REQUEST_TIMEOUT: "120"
+      AI_HTTP_TIMEOUT: "110"
+    volumes:
+      - app-state:/app/.run
+    ports:
+      - "127.0.0.1:8000:8000"
+
+volumes:
+  ollama-models:
+  model-files:
+  app-state:

@@ -56,7 +56,13 @@ def render_evidence(evidence, context):
         source_id, quote = item["source_id"], item["quote"]
         if not isinstance(source_id, str) or source_id not in context or not isinstance(quote, str):
             raise EvidenceError("Модель сослалась на источник вне проверенного контекста.")
-        paragraphs, indexes = locate_paragraphs(context[source_id]["text"], quote)
+        try:
+            paragraphs, indexes = locate_paragraphs(context[source_id]["text"], quote)
+        except EvidenceError:
+            # The model can return several anchors for one answer. Keep only
+            # anchors independently found in the reviewed source; generated
+            # prose is never rendered, and all-invalid evidence still fails.
+            continue
         if source_id not in selected:
             selected[source_id] = (paragraphs, set())
         selected[source_id][1].update(indexes)
@@ -76,7 +82,13 @@ def render_evidence(evidence, context):
                     indexes.add(index - 1)
         excerpt = "\n\n".join(paragraphs[index] for index in sorted(indexes))
         sections.append(f"{excerpt} [{source_id}]")
-        sources.append({key: value for key, value in source.items() if key != "text"})
+        # Keep the restored original wording separately from the answer.  It is
+        # shown only in Telegram's expandable evidence block; presentation text
+        # never replaces this provenance record.
+        sources.append({
+            **{key: value for key, value in source.items() if key != "text"},
+            "evidence_text": excerpt,
+        })
     if not sections:
         raise EvidenceError("Нет подтверждающих фрагментов.")
     return {

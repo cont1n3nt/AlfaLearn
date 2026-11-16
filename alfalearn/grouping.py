@@ -3,25 +3,64 @@
 import asyncio
 import logging
 import re
+from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass, field
 
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from alfa_ai import AIRequest, AIService, LearningProfile
 from alfalearn.answers import MessageKind, build_answer, classify_message
-from alfalearn.knowledge import TOO_LONG, format_answer
-from alfalearn.llm import OllamaClient, OllamaError
+from alfalearn.analytics import EventStore
+from alfalearn.calculator_cards import CARDS_BY_SLUG
+from alfalearn.calculator_menu import TAX_CALCULATOR_QUERY, card_keyboard
 from alfalearn.conversation import DialogueContext
+from alfalearn.knowledge import (
+    TOO_LONG,
+    format_answer,
+    format_telegram_answer,
+    format_thinking,
+    without_custom_emoji,
+)
+from alfalearn.llm import OllamaClient, OllamaError
 from alfalearn.memory import ConversationStore
+from alfalearn.reminder_runtime import ReminderDialogue
 
 logger = logging.getLogger(__name__)
 GroupKey = tuple[int, int | None, int | None, int | None]
 OLLAMA_UNAVAILABLE = "Сейчас не удалось получить ответ от Ollama. Попробуйте ещё раз чуть позже."
 GROUP_TOO_LONG = "Сообщение слишком длинное. Сократите вопрос до 16 000 символов и 100 сообщений."
+ALBUM_GROUP_DELAY_SECONDS = 0.25
 TEXT_KINDS = {
     MessageKind.TEXT, MessageKind.LINK, MessageKind.REPLY,
     MessageKind.QUOTE, MessageKind.FORWARDED, MessageKind.EMOJI,
 }
+
+
+def is_short_clarification(text: str) -> bool:
+    """Only a short answer to an open question may extend its stored topic."""
+    value = text.strip()
+    if len(value) > 120 or "?" in value or "\n" in value:
+        return False
+    words = re.findall(r"[^\W_]+", value, flags=re.UNICODE)
+    if not words or len(words) > 7:
+        return False
+    return not bool(re.match(
+        r"^(?:как|почему|зачем|сколько|что|чем|какой|какая|какие|покажи|найди|расскажи)\b",
+        value, re.I,
+    ))
+
+
+def is_topic_follow_up(text: str) -> bool:
+    """Recognize an explicit reference to the last completed topic."""
+    value = text.strip()
+    return len(value) <= 120 and bool(re.fullmatch(
+        r"(?:а\s+)?(?:как|что|почему|зачем|чем)\s+(?:это|такое|так)"
+        r"(?:\s+[^?!.\n]+)?[?!.]*",
+        value,
+        re.I,
+    ))
 
 
 def is_clear_question(text: str) -> bool:
@@ -94,7 +133,8 @@ class AnswerBuffer:
         self, delay_seconds: float = 1.0, *, llm: OllamaClient | None = None,
         classification_timeout_seconds: float = 0.8,
         memory: ConversationStore | None = None, history_context_chars: int = 12_000,
-        ai: AIService | None = None,
+        ai: AIService | None = None, reminders: ReminderDialogue | None = None,
+        analytics: EventStore | None = None,
     ):
         if delay_seconds <= 0:
             raise ValueError("Grouping delay must be positive")
@@ -103,6 +143,8 @@ class AnswerBuffer:
         self.delay_seconds = delay_seconds
         self.llm = llm
         self.ai = ai
+        self.reminders = reminders
+        self.analytics = analytics
         self.classification_timeout_seconds = classification_timeout_seconds
         self.store = memory if memory is not None else ConversationStore()
         self._owns_store = memory is None
@@ -111,6 +153,10 @@ class AnswerBuffer:
         self.epochs: dict[GroupKey, int] = {}
         self.key_tasks: dict[GroupKey, set[asyncio.Task]] = {}
         self.pending: dict[GroupKey, PendingGroup] = {}
+        self.queued: dict[GroupKey, deque[tuple[Message, str | None]]] = {}
+        # Telegram may redeliver an update after an answer was already sent.
+        # Keep only opaque message IDs in process memory; no content is retained.
+        self.seen_message_ids: dict[GroupKey, set[tuple[int, tuple[str, ...], str | None]]] = {}
         self.tasks: set[asyncio.Task] = set()
         self.closed = False
 
@@ -126,25 +172,52 @@ class AnswerBuffer:
         key = self.conversation_key(message)
         self.epochs[key] = self.epochs.get(key, 0) + 1
         self.pending.pop(key, None)
+        self.queued.pop(key, None)
+        self.seen_message_ids.pop(key, None)
         for task in tuple(self.key_tasks.get(key, ())):
             task.cancel()
         self.store.clear(key)
+        if self.reminders is not None:
+            self.reminders.store.clear_draft(key)
 
     def add(
-        self, message: Message, command_answer: str | None = None,
+        self, message: Message, command_answer: str | None = None, *,
+        _from_queue: bool = False,
     ) -> None:
         if self.closed:
             return
         key = self.conversation_key(message)
-        now = asyncio.get_running_loop().time()
         kinds = classify_message(message, bot_id=message.bot.id)
+        if not _from_queue:
+            seen = self.seen_message_ids.setdefault(key, set())
+            # Telegram guarantees a message ID within a chat; tests and some
+            # imported fixtures may reuse an ID for different media.  Treat
+            # only the identical delivered payload as a retry.
+            delivery = (message.message_id, tuple(sorted(kinds)), message.media_group_id)
+            if delivery in seen:
+                return
+            seen.add(delivery)
+            if len(seen) > 2048:
+                # Message IDs are monotonically increasing within a chat; retaining
+                # the newest window is enough to defeat delivery retries.
+                self.seen_message_ids[key] = set(sorted(seen)[-1024:])
+        now = asyncio.get_running_loop().time()
+        group = self.pending.get(key)
+        queued = self.queued.get(key)
+        if queued is not None and any(item.message_id == message.message_id for item, _ in queued):
+            return
+        if queued and not _from_queue:
+            queued.append((message, command_answer))
+            return
+        if group is not None and self._starts_separate_turn(group, message, command_answer, kinds):
+            self.queued.setdefault(key, deque()).append((message, command_answer))
+            return
         history_id = None
         if (
             (self.llm is not None or self.ai is not None) and message.text and command_answer is None
             and not message.text.startswith("/") and kinds <= TEXT_KINDS
         ):
             history_id = self.store.append_user(key, message.text, message.message_id)
-        group = self.pending.get(key)
         if group is not None and history_id is not None and history_id in group.history_ids:
             return
         if group is None:
@@ -174,6 +247,31 @@ class AnswerBuffer:
         self.key_tasks.setdefault(key, set()).add(task)
         task.add_done_callback(lambda done: self._key_task_done(key, done))
         task.add_done_callback(self._task_done)
+
+    def _starts_separate_turn(
+        self, group: PendingGroup, message: Message,
+        command_answer: str | None, kinds: set[MessageKind],
+    ) -> bool:
+        """Keep complete rapid-fire questions as ordered dialogue turns."""
+        if (
+            (self.llm is None and self.ai is None) or command_answer is not None
+            or not message.text or message.text.startswith("/") or not kinds <= TEXT_KINDS
+            or group.has_command or group.overflow or not group.texts
+        ):
+            return False
+        previous = group.texts[-1].strip()
+        incoming = message.text.strip()
+        previous_is_request = previous.endswith("?") or bool(re.match(
+            r"^(?:расскажи|объясни|подскажи|покажи|найди|посоветуй)\b",
+            previous,
+            re.I,
+        ))
+        incoming_is_request = incoming.endswith("?") or bool(re.match(
+            r"^(?:расскажи|объясни|подскажи|покажи|найди|посоветуй)\b",
+            incoming,
+            re.I,
+        ))
+        return (previous_is_request and incoming_is_request) or is_topic_follow_up(incoming)
 
     async def _reply_after_pause(self, key: GroupKey, group: PendingGroup) -> None:
         # Keep generation and delivery in order. A message received during an
@@ -217,7 +315,11 @@ class AnswerBuffer:
         if not is_current():
             return
         if not ready:
-            remaining = group.last_received + self.delay_seconds - asyncio.get_running_loop().time()
+            pause = max(
+                self.delay_seconds,
+                ALBUM_GROUP_DELAY_SECONDS if MessageKind.ALBUM in group.kinds else 0,
+            )
+            remaining = group.last_received + pause - asyncio.get_running_loop().time()
             if remaining > 0:
                 await asyncio.sleep(remaining)
         if not is_current():
@@ -229,25 +331,68 @@ class AnswerBuffer:
             return
         record_answer = False
         consultation = None
+        rich_answer = None
+        thinking_message = None
+        reply_markup = None
         if group.overflow:
             answer = GROUP_TOO_LONG
         elif group.count == 1 and group.command_answer:
             answer = group.command_answer
+        elif use_llm and self.reminders is not None and (
+            reminder_answer := self.reminders.handle(key, text)
+        ) is not None:
+            answer = reminder_answer
+            record_answer = True
+        elif use_llm and TAX_CALCULATOR_QUERY.search(text):
+            calculator = CARDS_BY_SLUG["kalkulyator-sistem-nalogooblozheniya"]
+            answer = (
+                "Для выбора налогового режима есть калькулятор Альфа-Курса. "
+                "Он сравнивает режимы по параметрам бизнеса, но не рассчитывает сумму налога "
+                "к уплате именно на УСН."
+            )
+            reply_markup = card_keyboard(calculator)
+            rich_answer = None
         elif use_llm and self.ai is not None:
             if len(text.strip()) > 1000:
                 answer = TOO_LONG
             else:
-                profile, previous_query = self.store.consultation(key)
-                response = await self.ai.answer(
-                    AIRequest(query=text, profile=LearningProfile(**profile), previous_query=previous_query)
-                )
+                profile, previous_query, pending_query = self.store.consultation_state(key)
+                effective_text = text.strip()
+                if pending_query and is_short_clarification(effective_text):
+                    combined = f"{pending_query}\nУточнение пользователя: {effective_text}"
+                    if len(combined) <= 1000:
+                        effective_text = combined
+                elif (
+                    previous_query
+                    and is_topic_follow_up(effective_text)
+                    and not is_topic_follow_up(previous_query)
+                ):
+                    combined = (
+                        f"Текущий вопрос: {effective_text}\n"
+                        f"Контекст предыдущей темы: {previous_query}"
+                    )
+                    if len(combined) <= 1000:
+                        effective_text = combined
+                try:
+                    thinking_message = await _send_thinking(group.message)
+                    response = await self.ai.answer(
+                        AIRequest(
+                            query=effective_text, profile=LearningProfile(**profile),
+                            previous_query=previous_query,
+                        )
+                    )
+                except asyncio.CancelledError:
+                    await _remove_thinking(thinking_message)
+                    raise
                 answer = format_answer(response)
+                rich_answer = format_telegram_answer(response)
                 record_answer = response.status != "error"
                 if record_answer:
                     if response.profile_patch is not None:
                         profile.update(response.to_dict()["profile_patch"])
-                    last_query = text.strip() if response.proposed_action is None else previous_query
-                    consultation = profile, last_query
+                    last_query = effective_text if response.proposed_action is None else previous_query
+                    pending = effective_text if response.status == "clarify" else None
+                    consultation = profile, last_query, pending
         elif use_llm and self.llm is not None:
             try:
                 if context_error:
@@ -260,15 +405,34 @@ class AnswerBuffer:
         else:
             answer = build_answer(group.kinds, group.count)
         if not is_current():
+            await _remove_thinking(thinking_message)
             return
         # Incoming messages now start a new group and cannot cancel delivery.
         self.pending.pop(key)
-        for chunk in telegram_chunks(answer):
-            await group.message.answer(chunk)
+        if rich_answer is not None:
+            try:
+                await _deliver_rich_answer(group.message, thinking_message, rich_answer)
+            except TelegramBadRequest:
+                logger.info("Telegram rejected premium formatting; retrying with fallback emoji")
+                await _deliver_rich_answer(
+                    group.message, thinking_message, without_custom_emoji(rich_answer),
+                )
             if self.epochs.get(key, 0) != group.epoch or self.closed:
                 return
             if record_answer and self.epochs.get(key, 0) == group.epoch:
-                self.store.append_assistant(key, chunk)
+                self.store.append_assistant(key, answer)
+                if self.analytics is not None and response.status == "answer":
+                    self.analytics.record_once(f"shown:{response.trace_id}", "answer_shown")
+        else:
+            for index, chunk in enumerate(telegram_chunks(answer)):
+                if index == 0 and isinstance(thinking_message, Message):
+                    await thinking_message.edit_text(chunk)
+                else:
+                    await group.message.answer(chunk, reply_markup=reply_markup if index == 0 else None)
+                if self.epochs.get(key, 0) != group.epoch or self.closed:
+                    return
+                if record_answer and self.epochs.get(key, 0) == group.epoch:
+                    self.store.append_assistant(key, chunk)
         if consultation is not None:
             self.store.save_consultation(key, *consultation)
 
@@ -278,6 +442,11 @@ class AnswerBuffer:
             tasks.discard(task)
             if not tasks:
                 self.key_tasks.pop(key, None)
+        if self.pending.get(key) is None and (queued := self.queued.get(key)):
+            message, command_answer = queued.popleft()
+            if not queued:
+                self.queued.pop(key, None)
+            self.add(message, command_answer, _from_queue=True)
 
     def _task_done(self, task: asyncio.Task) -> None:
         self.tasks.discard(task)
@@ -302,5 +471,42 @@ class AnswerBuffer:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.pending.clear()
+        self.queued.clear()
+        self.seen_message_ids.clear()
         if self._owns_store:
             self.store.close()
+
+
+async def _send_rich_answer(message, answer):
+    return await message.answer(
+        answer.text,
+        entities=list(answer.entities),
+        link_preview_options=answer.link_preview_options,
+        reply_markup=answer.reply_markup,
+    )
+
+
+async def _send_thinking(message):
+    thinking = format_thinking()
+    try:
+        return await _send_rich_answer(message, thinking)
+    except TelegramBadRequest:
+        logger.info("Telegram rejected premium loading emoji; using fallback emoji")
+        return await _send_rich_answer(message, without_custom_emoji(thinking))
+
+
+async def _deliver_rich_answer(message, thinking_message, answer):
+    if isinstance(thinking_message, Message):
+        return await thinking_message.edit_text(
+            answer.text,
+            entities=list(answer.entities),
+            link_preview_options=answer.link_preview_options,
+            reply_markup=answer.reply_markup,
+        )
+    return await _send_rich_answer(message, answer)
+
+
+async def _remove_thinking(thinking_message):
+    if isinstance(thinking_message, Message):
+        with suppress(TelegramBadRequest):
+            await thinking_message.delete()

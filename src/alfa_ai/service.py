@@ -83,7 +83,9 @@ class AIService:
             cards = lookup_requested_materials(effective)
             if cards is not None:
                 text = (
-                    "В каталоге есть материалы по вашему запросу."
+                    "В каталоге есть подходящий материал."
+                    if len(cards) == 1
+                    else "В каталоге есть подходящие материалы."
                     if cards
                     else "В проверенном каталоге нет подходящих материалов по вашему запросу."
                 )
@@ -151,6 +153,15 @@ class AIService:
         except asyncio.CancelledError:
             job.cancel()
             raise
+
+    async def readiness(self) -> bool:
+        self._check_loop()
+        if self._closed:
+            return False
+        try:
+            return bool(await asyncio.to_thread(self._engine.readiness))
+        except Exception:
+            return False
 
     async def aclose(self) -> None:
         self._check_loop()

@@ -1,16 +1,20 @@
-"""Lexical scoring, source diversity, and rank fusion."""
+"""Lexical retrieval, local second-stage reranking, and source diversity."""
 
+import re
 from itertools import islice
 
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 LIMIT = 3
+RERANK_CANDIDATES = 12
 NAMED_EPISODE_LIMIT = 4
 NAMED_EPISODE_SEMANTIC_LIMIT = 2
 SCOPED_LEXICAL_QUERY_WEIGHT = 0.75
 RRF_K = 60
-COMPARABLE_SCORE = 0.9
+# With the expanded corpus, a second passage from the same article should not
+# crowd out a nearly equal passage that covers a distinct part of the question.
+COMPARABLE_SCORE = 0.89
 
 
 class LexicalIndex:
@@ -21,6 +25,38 @@ class LexicalIndex:
 
     def score(self, queries):
         return (self.vectorizer.transform(queries) @ self.vectors.T).toarray()
+
+
+def _terms(text):
+    """Keep meaningful Cyrillic/Latin terms; no external model or network required."""
+    return tuple(term for term in re.findall(r"[\w-]{3,}", text.casefold()) if not term.isdigit())
+
+
+def rerank(question, candidates, base_scores, ranking, *, candidate_limit=RERANK_CANDIDATES):
+    """Rerank only first-stage candidates using query coverage in trusted headings.
+
+    The candidate set is fixed by TF-IDF first, so this function never admits a
+    passage that the primary retriever did not select. It is intentionally local
+    and deterministic: release quality does not depend on an additional API or
+    a downloaded cross-encoder.
+    """
+    shortlist = list(ranking[:candidate_limit])
+    terms = set(_terms(question))
+    if not shortlist or not terms:
+        return shortlist + list(ranking[candidate_limit:])
+    rescored = []
+    for position, index in enumerate(shortlist):
+        candidate = candidates[index]
+        heading = " ".join([candidate["title"], *candidate.get("section", ())]).casefold()
+        body = candidate["text"].casefold()
+        heading_coverage = sum(term in heading for term in terms) / len(terms)
+        body_coverage = sum(term in body for term in terms) / len(terms)
+        # The first-stage score remains dominant; headings only resolve close
+        # candidates whose topic names match the question more directly.
+        score = base_scores[index] + 0.01 * heading_coverage + 0.0025 * body_coverage
+        rescored.append((-score, position, index))
+    rescored.sort()
+    return [index for _, _, index in rescored] + list(ranking[candidate_limit:])
 
 
 def diverse_context(ranking, scores, passages, limit):
@@ -75,6 +111,7 @@ def select_context(
     else:
         scores = index.score([question])[0]
     ranking = np.argsort(-scores, kind="stable")
+    ranking = rerank(question, candidates, scores, ranking)
     if document_ids:
         scoped_ranking = (i for i in ranking if candidates[i]["document_id"] in document_ids)
         selected = list(islice(scoped_ranking, limit))

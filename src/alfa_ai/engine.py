@@ -2,9 +2,10 @@
 
 import json
 import re
+from hashlib import sha256
 
 from .evidence import EvidenceError
-from .generation import GenerationTruncated, generate_with_context
+from .generation import GenerationTruncated, generate_with_context, pinned_model_available
 from .podcasts import (
     EPISODE_REFERENCE,
     load_podcast_passages,
@@ -16,7 +17,7 @@ from .podcasts import (
 from .retrieval import LIMIT, NAMED_EPISODE_LIMIT, LexicalIndex, select_context
 from .reviewed import approved_passages
 from .semantic import SemanticIndex
-from .settings import Settings
+from .settings import DEFAULT_CORPUS_PATH, PACKAGED_CORPUS_SHA256, Settings
 
 BARE_REFERENCE = re.compile(
     r"(?:как\s+(?:это|такое)\s+(?:настроить|сделать|оформить|посчитать|подключить|проверить)"
@@ -27,6 +28,32 @@ PODCAST_CLARIFICATION = {
     "text": "Какой выпуск вы имеете в виду? Укажите его название.",
     "sources": [],
 }
+COMPOUND_PART = re.compile(
+    r"\s+и\s+(?=(?:как|что|чем|почему|зачем|сколько|где|когда|какой|какая|какие)\b)",
+    re.I,
+)
+PODCAST_QUERY = re.compile(r"\b(?:подкаст|выпуск)\w*\b", re.I)
+
+
+def compound_parts(question):
+    parts = [part.strip(" ,") for part in COMPOUND_PART.split(question) if part.strip(" ,")]
+    return parts if len(parts) == 2 and all(len(part) >= 12 for part in parts) else []
+
+
+def merge_contexts(contexts, limit=4):
+    merged = {}
+    seen = set()
+    for context in contexts:
+        for source in context.values():
+            key = source["document_id"], source["chunk_id"]
+            if key in seen:
+                continue
+            seen.add(key)
+            source_id = f"S{len(merged) + 1}"
+            merged[source_id] = {**source, "source_id": source_id}
+            if len(merged) == limit:
+                return merged
+    return merged
 
 
 class RagEngine:
@@ -35,8 +62,13 @@ class RagEngine:
     def __init__(self, chunks=None, *, settings=None):
         self.settings = settings or Settings.from_env()
         if chunks is None:
-            with self.settings.corpus_path.open(encoding="utf-8") as stream:
-                chunks = [json.loads(line) for line in stream if line.strip()]
+            data = self.settings.corpus_path.read_bytes()
+            if (
+                self.settings.corpus_path == DEFAULT_CORPUS_PATH
+                and sha256(data).hexdigest() != PACKAGED_CORPUS_SHA256
+            ):
+                raise ValueError("Упакованный корпус изменён или повреждён.")
+            chunks = [json.loads(line) for line in data.decode("utf-8").splitlines() if line.strip()]
         self.passages = approved_passages(chunks)
         if self.settings.podcast_corpus_path is not None:
             self.passages.extend(
@@ -57,10 +89,19 @@ class RagEngine:
             else None
         )
 
-    def retrieve(self, question, *, document_ids=None):
+    def readiness(self):
+        if not self.passages:
+            return False
+        if self.settings.corpus_path == DEFAULT_CORPUS_PATH and (
+            sha256(self.settings.corpus_path.read_bytes()).hexdigest() != PACKAGED_CORPUS_SHA256
+        ):
+            return False
+        return pinned_model_available(self.settings)
+
+    def retrieve(self, question, *, document_ids=None, limit=None):
         index = self.index
         focused_question = None
-        limit = LIMIT
+        limit = LIMIT if limit is None else limit
         supplemental_index = None
         if document_ids and self.episodes.keys() >= document_ids:
             focused = podcast_search_text(question, self.episodes, document_ids)
@@ -106,34 +147,48 @@ class RagEngine:
                 "text": "Уточните, о чём именно вы спрашиваете?",
                 "sources": [],
             }
+        if not self.episodes and PODCAST_QUERY.search(question):
+            return {
+                "status": "no_answer",
+                "text": "Проверенных расшифровок подкастов пока нет в базе ответов.",
+                "sources": [],
+            }
         if (
             not episode_ids
-            and len(self.episodes) > 1
+            and self.episodes
             and EPISODE_REFERENCE.search(normalized_question)
         ):
             if trace is not None:
                 trace["episode_clarification"] = "unnamed_reference"
             return {**PODCAST_CLARIFICATION, "sources": []}
-        context = self.retrieve(question, document_ids=episode_ids)
+        parts = compound_parts(question) if not episode_ids else []
+        context = (
+            merge_contexts([self.retrieve(part, limit=2) for part in parts])
+            if parts else self.retrieve(question, document_ids=episode_ids)
+        )
         if trace is not None:
             trace["context"] = list(context.values())
         try:
             result = generate_with_context(question, context, trace=trace, settings=self.settings)
         except (EvidenceError, GenerationTruncated) as exc:
-            if len(episode_ids) == 1 and len(context) > 1:
+            retry_evidence = isinstance(exc, EvidenceError) and bool(context)
+            retry_named_truncation = (
+                isinstance(exc, GenerationTruncated)
+                and len(episode_ids) == 1
+                and len(context) > 1
+            )
+            if retry_evidence or retry_named_truncation:
                 if trace is not None:
                     trace["citation_retry"] = str(exc)
-                shorter = len(context) > NAMED_EPISODE_LIMIT
-                retry_context = (
-                    dict(list(context.items())[:NAMED_EPISODE_LIMIT]) if shorter else context
-                )
+                shorter = bool(episode_ids and len(context) > NAMED_EPISODE_LIMIT)
+                retry_context = dict(list(context.items())[:NAMED_EPISODE_LIMIT]) if shorter else context
                 try:
                     return generate_with_context(
                         question,
                         retry_context,
                         trace=trace,
                         settings=self.settings,
-                        brief=not shorter,
+                        brief=retry_evidence and not shorter,
                     )
                 except (EvidenceError, GenerationTruncated) as retry_error:
                     exc = retry_error
@@ -146,6 +201,24 @@ class RagEngine:
                 "text": "Не удалось подтвердить ответ по проверенным источникам.",
                 "sources": [],
             }
+        if (
+            result["status"] == "no_answer"
+            and not parts
+            and not episode_ids
+            and len(context) > 1
+            and max(self.index.score([question])[0], default=0) >= 0.25
+        ):
+            focused_context = {"S1": next(iter(context.values()))}
+            if trace is not None:
+                trace["focused_retry"] = focused_context["S1"]["document_id"]
+            try:
+                focused = generate_with_context(
+                    question, focused_context, trace=trace, settings=self.settings, brief=True
+                )
+                if focused["status"] == "answer":
+                    result = focused
+            except (EvidenceError, GenerationTruncated):
+                pass
         if not episode_ids and len(self.episodes) > 1:
             cited_episodes = {
                 source["document_id"]

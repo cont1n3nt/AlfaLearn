@@ -2,6 +2,8 @@
 
 from hashlib import sha256
 
+from .reviewed_expansion import REVIEWED_EXPANSION
+
 LOYALTY = "article:ef04f756-44bf-478a-b022-51fae04ecee5"
 RESALE = "article:000ecbf2-ccb2-4305-82e2-f3ed7ce1b22c"
 PRINTER = "article:33a3a4ca-ab5e-4e58-bbeb-62afae4de0ba"
@@ -16,6 +18,10 @@ REMOTE_TEAM = "article:9e4e421f-bc27-4bac-aa7a-bc527e7b6539"
 HIRING = "article:ce10a90f-8257-4ac9-9b86-e586d81c5c6c"
 PRODUCT_SKU = "article:f3d25c33-90cc-47ab-8d55-c67d9241b049"
 REPEAT_SALES = "article:33eae91e-6594-43b9-862a-8869c0e25f81"
+MARKETPLACE_PACKAGING = "article:f78dc106-10bc-4d37-9bab-5d36c17352d8"
+SERVICE_STANDARDS = "article:d927c3a8-188a-459f-bf10-d9e9dc67d0df"
+LOGISTICS_OPTIMIZATION = "article:50817782-86c6-4703-b436-0452cf31ec7f"
+PROFITABILITY = "article:d38ff662-4489-4dcf-8555-93abc52bf98c"
 
 REVIEWED = {
     SALON_RETURN: (
@@ -124,7 +130,28 @@ REVIEWED = {
             (39, 40, 41, 42): "22abfe5fc48e939b333496307b278828513f5b5ca8e1967d2c8b5cc1715d9d2b",
         },
     ),
+    MARKETPLACE_PACKAGING: (
+        "https://kurs.alfabank.ru/articles/trebovaniya-k-upakovke-tovarov-dlya-marketplejsov/",
+        {(7, 10, 11): "24a686c93239f5439aef20153385903514cc138262cb4eb321dfbf92cdc99820"},
+    ),
+    SERVICE_STANDARDS: (
+        "https://kurs.alfabank.ru/articles/standarty-obsluzhivaniya-klientov-kak-vnedrit-i-kontrolirovat/",
+        {(10, 11, 12, 13, 14, 15): "737c5750a7c84d23d4aa9c15d87266d45df57c1ef308b52cb4d18019f454ddd1"},
+    ),
+    LOGISTICS_OPTIMIZATION: (
+        "https://kurs.alfabank.ru/articles/optimizaciya-logistiki-kak-ona-pomogaet-sokratit-raskhody/",
+        {(55, 57, 72): "936653526127526ea3ebfba02408120d9f449aca2510e5c7ca72cb25053afd1c"},
+    ),
+    PROFITABILITY: (
+        "https://kurs.alfabank.ru/articles/rentabelnost-bolshe-chem-prosto-pribyl/",
+        {(14, 15): "526e043000efce4e37c635575d2309d35e3d0a551374c0310807a05f42d16f39"},
+    ),
 }
+
+# The expansion is generated only from the reviewed, public candidate pack.
+# Keep it separate from the hand-curated starter map so the audit trail stays
+# compact and the runtime continues to validate exact source bytes.
+REVIEWED.update(REVIEWED_EXPANSION)
 
 # Zero-based paragraph groups in hash-verified passages. Keep the reason about
 # print durability together with the recommendation about long storage.
@@ -138,6 +165,14 @@ PARAGRAPH_GROUPS = {
 # Search metadata for terminology used in questions. These strings are not evidence.
 SEARCH_TERMS = {
     (
+        RESALE,
+        (32, 33, 34),
+    ): "Сравнение Wildberries и Авито: личный кабинет продавца, прямая сделка между пользователями",
+    (
+        REMOTE_TEAM,
+        (32, 33),
+    ): "Асинхронное общение: коллеги отвечают не одновременно, мессенджеры и документы",
+    (
         REMOTE_TEAM,
         (20, 21),
     ): "Удалённая работа: после созвона сохранить решение письменно, журнал договорённостей",
@@ -145,6 +180,18 @@ SEARCH_TERMS = {
         REPEAT_SALES,
         (9, 10),
     ): "LTV покупателя: жизненная ценность, доход от клиента за весь срок взаимодействия",
+    (
+        LOYALTY,
+        (12,),
+    ): "Простые понятные правила начисления и траты бонусов без сложных условий",
+    (
+        CUSTOMER_CONFLICT,
+        (12, 13, 14, 15, 16, 17),
+    ): "Покупатель жалуется: сначала выслушать клиента, затем уточнить проблему и предложить решение",
+    (MARKETPLACE_PACKAGING, (7, 10, 11)): "Упаковка товара для маркетплейса: защита от повреждений, размер коробки, фото перед отправкой",
+    (SERVICE_STANDARDS, (10, 11, 12, 13, 14, 15)): "Стандарты сервиса: быстро отвечать, выслушать, решить вопрос с первого обращения, уважительный тон",
+    (LOGISTICS_OPTIMIZATION, (55, 57, 72)): "Оптимизация логистики: стоимость доставки заказа, маршруты, пробег и скорость доставки",
+    (PROFITABILITY, (14, 15)): "Маржинальность: прямые переменные расходы, прибыль с продажи и текущая цена",
 }
 
 

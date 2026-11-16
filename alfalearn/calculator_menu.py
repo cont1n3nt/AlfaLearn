@@ -1,5 +1,7 @@
 """Telegram commands for the calculators: /calc menu and one command per calculator."""
 
+import re
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.filters.callback_data import CallbackData
@@ -15,6 +17,13 @@ from alfalearn.calculator_cards import CARDS, CARDS_BY_SLUG, MENU_TEXT, Calculat
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 MENU_COMMANDS = ("calc", "calculators")
+TAX_CALCULATOR_QUERY = re.compile(
+    r"(?:калькулятор\w*|рассчитать\w*|расч[её]т\w*|посчитать\w*|подобрать\w*)"
+    r".{0,100}(?:налог\w*|усн|систем\w* налогообложен\w*)"
+    r"|(?:налог\w*|усн|систем\w* налогообложен\w*)"
+    r".{0,100}(?:калькулятор\w*|рассчитать\w*|расч[её]т\w*|посчитать\w*|подобрать\w*)",
+    re.I,
+)
 
 
 class CalculatorChoice(CallbackData, prefix="calc"):

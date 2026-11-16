@@ -9,12 +9,15 @@ from urllib.parse import urlsplit
 
 DEFAULT_MODEL = "qwen35-unc-local:latest"
 DEFAULT_DIGEST = "4cde2d71a709d75cf51d3d0e45432995ac55457175f73e96ca5d47376c721173"
+DEFAULT_CORPUS_PATH = Path(__file__).resolve().parents[2] / "assets" / "reviewed_articles.jsonl"
+PACKAGED_CORPUS_SHA256 = "6dad98fed9b35db108b45911d1a6787cf081e678b1b2ed33d79e38849dec4ef7"
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    corpus_path: Path = Path("data/local/pilot_chunks.jsonl")
+    corpus_path: Path = DEFAULT_CORPUS_PATH
     ollama_url: str = "http://127.0.0.1:11434"
+    ollama_internal_host: str | None = None
     model: str = DEFAULT_MODEL
     model_digest: str = DEFAULT_DIGEST
     request_timeout: float = 60.0
@@ -40,16 +43,24 @@ class Settings:
             if not re.fullmatch(r"[a-f0-9]{64}", self.podcast_corpus_sha256):
                 raise ValueError("AI_PODCAST_CORPUS_SHA256 должен содержать SHA-256 файла.")
         url = urlsplit(self.ollama_url)
+        if self.ollama_internal_host is not None and (
+            self.ollama_internal_host != "host.docker.internal"
+            and not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", self.ollama_internal_host)
+        ):
+            raise ValueError("AI_OLLAMA_INTERNAL_HOST должен быть именем внутреннего сервиса.")
+        allowed_hosts = {"127.0.0.1", "::1"}
+        if self.ollama_internal_host:
+            allowed_hosts.add(self.ollama_internal_host)
         if (
             url.scheme != "http"
-            or url.hostname not in {"127.0.0.1", "::1"}
+            or url.hostname not in allowed_hosts
             or url.username
             or url.password
             or url.path not in {"", "/"}
             or url.query
             or url.fragment
         ):
-            raise ValueError("AI_OLLAMA_URL должен быть HTTP-адресом 127.0.0.1 или [::1] без пути.")
+            raise ValueError("AI_OLLAMA_URL должен указывать на loopback или явно заданный внутренний сервис без пути.")
         if url.port is not None and not 1 <= url.port <= 65535:
             raise ValueError("Некорректный порт Ollama.")
         object.__setattr__(self, "ollama_url", self.ollama_url.rstrip("/"))
@@ -73,8 +84,9 @@ class Settings:
     @classmethod
     def from_env(cls):
         return cls(
-            corpus_path=Path(os.getenv("AI_CORPUS_PATH", "data/local/pilot_chunks.jsonl")),
+            corpus_path=Path(os.getenv("AI_CORPUS_PATH", str(DEFAULT_CORPUS_PATH))),
             ollama_url=os.getenv("AI_OLLAMA_URL", "http://127.0.0.1:11434"),
+            ollama_internal_host=os.getenv("AI_OLLAMA_INTERNAL_HOST") or None,
             model=os.getenv("AI_MODEL", DEFAULT_MODEL),
             model_digest=os.getenv("AI_MODEL_DIGEST", DEFAULT_DIGEST),
             request_timeout=float(os.getenv("AI_REQUEST_TIMEOUT", "60")),

@@ -1,14 +1,16 @@
 from aiogram import Dispatcher, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from alfa_ai import AIService
 from alfalearn.accounts.bot import create_accounts_router
+from alfalearn.analytics import EventStore
 from alfalearn.accounts.service import AccountService
 from alfalearn.calculator_menu import create_calculator_router
 from alfalearn.grouping import AnswerBuffer
 from alfalearn.llm import OllamaClient
 from alfalearn.memory import ConversationStore
+from alfalearn.reminder_runtime import ReminderDialogue
 from alfalearn.vat_bot import create_vat_router
 
 # HTTP GET /hello keeps the connectivity check answer.
@@ -43,13 +45,14 @@ def greeting_message(*, llm: bool, accounts: bool) -> str:
     )
 
 
-def help_message(*, accounts: bool) -> str:
+def help_message(*, accounts: bool, reminders: bool = False) -> str:
     """Answer to /help: available commands except /start and /hello."""
     return (
         "Доступные команды:\n"
         + (ACCOUNT_COMMANDS if accounts else "")
         + "/calc — калькуляторы Альфа-Курса\n"
-        "/reset — очистить историю диалога\n"
+        + ("/reminders — мои активные напоминания\n" if reminders else "")
+        + "/reset — очистить историю диалога\n"
         "/help — показать этот список"
     )
 
@@ -60,15 +63,39 @@ def create_dispatcher(
     memory: ConversationStore | None = None, history_context_chars: int = 12_000,
     accounts: AccountService | None = None,
     ai: AIService | None = None,
+    reminders: ReminderDialogue | None = None,
+    analytics: EventStore | None = None,
 ) -> Dispatcher:
     router = Router(name="answers")
     buffer = AnswerBuffer(
         group_delay_seconds, llm=llm,
         classification_timeout_seconds=classification_timeout_seconds,
         memory=memory, history_context_chars=history_context_chars, ai=ai,
+        reminders=reminders, analytics=analytics,
     )
     greeting = greeting_message(llm=ai is not None or llm is not None, accounts=accounts is not None)
-    help_text = help_message(accounts=accounts is not None)
+    help_text = help_message(accounts=accounts is not None, reminders=reminders is not None)
+
+    @router.callback_query(lambda query: bool(query.data and query.data.startswith("feedback:")))
+    async def feedback(query: CallbackQuery) -> None:
+        _, vote, trace_id = query.data.split(":", 2)
+        if vote == "clarify":
+            await query.answer("Напишите, что уточнить — я попробую ответить точнее.")
+            return
+        if analytics is None:
+            await query.answer("Спасибо за оценку!")
+            return
+        event = "feedback_positive" if vote == "+" else "feedback_negative"
+        fresh = analytics.record_once(f"feedback:{trace_id}", event)
+        if vote == "-" and fresh and query.message is not None:
+            previous = query.message.reply_markup
+            rows = [row for row in (previous.inline_keyboard if previous else [])
+                    if not any(button.callback_data and button.callback_data.startswith("feedback:") for button in row)]
+            rows.append([InlineKeyboardButton(
+                text="Уточнить вопрос", callback_data=f"feedback:clarify:{trace_id}"
+            )])
+            await query.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await query.answer("Спасибо за оценку!" if fresh else "Оценка уже учтена.")
 
     @router.message(CommandStart())
     @router.message(Command("hello"))
@@ -83,6 +110,30 @@ def create_dispatcher(
     async def reset(message: Message) -> None:
         buffer.reset(message)
         await message.answer(f"{RESET_MESSAGE}\n\n{greeting}")
+
+    @router.message(Command("reminders"))
+    async def list_reminders(message: Message) -> None:
+        if reminders is None:
+            await message.answer("Напоминания сейчас недоступны.")
+            return
+        items = reminders.store.list_visible(buffer.conversation_key(message))
+        if not items:
+            await message.answer("Активных напоминаний нет.")
+            return
+        lines = ["Ваши напоминания:"]
+        for item in items:
+            if item["status"] == "failed":
+                lines.append(
+                    f"#{item['id']} — не доставлено после трёх попыток; "
+                    "измените расписание или отключите напоминание."
+                )
+                continue
+            cadence = {"once": "разово", "daily": "ежедневно", "weekly": "еженедельно"}
+            lines.append(
+                f"#{item['id']} — {item['subject']}; {item['local_at'].replace('T', ' ')} "
+                f"({item['timezone']}), {cadence[item['repeat']]}"
+            )
+        await message.answer("\n".join(lines))
 
     # Register last so commands retain their dedicated replies.
     @router.message()

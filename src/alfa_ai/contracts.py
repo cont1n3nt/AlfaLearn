@@ -93,6 +93,7 @@ class Source:
     url: str
     start_sec: float | None = None
     end_sec: float | None = None
+    evidence_text: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.source_id, str) or not re.fullmatch(r"S[1-9]\d*", self.source_id):
@@ -112,6 +113,8 @@ class Source:
         url = urlsplit(self.url)
         if url.scheme != "https" or not url.hostname or url.username or url.password:
             raise ValueError("Источник должен иметь проверенный HTTPS URL.")
+        if self.evidence_text is not None and (not isinstance(self.evidence_text, str) or not self.evidence_text.strip()):
+            raise ValueError("Некорректный проверенный фрагмент источника.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,7 +167,9 @@ class AIResponse:
         result = asdict(self)
         result["sources"] = [
             {
-                **{key: value for key, value in asdict(source).items() if value is not None},
+                # Evidence text is a presentation-only proof; avoid expanding
+                # the HTTP contract with verbatim corpus content.
+                **{key: value for key, value in asdict(source).items() if value is not None and key != "evidence_text"},
                 "source_block_orders": list(source.source_block_orders),
             }
             for source in self.sources

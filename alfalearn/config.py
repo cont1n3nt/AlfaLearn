@@ -3,7 +3,8 @@ from pathlib import Path
 from pydantic import Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from alfa_ai.settings import DEFAULT_DIGEST, DEFAULT_MODEL, Settings as AISettings
+from alfa_ai.settings import DEFAULT_CORPUS_PATH, DEFAULT_DIGEST, DEFAULT_MODEL
+from alfa_ai.settings import Settings as AISettings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,13 +29,17 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
     classification_timeout_seconds: float = Field(default=2.0, ge=0.05, le=5)
     history_path: Path = PROJECT_ROOT / ".run" / "conversations.sqlite3"
+    reminders_path: Path = PROJECT_ROOT / ".run" / "reminders.sqlite3"
+    analytics_path: Path = PROJECT_ROOT / ".run" / "events.sqlite3"
+    analytics_retention_days: int = Field(default=90, ge=1, le=3650)
     history_context_chars: int = Field(default=12_000, ge=4_000, le=16_000)
     ollama_max_concurrency: int = Field(default=4, ge=1, le=16)
     demo_users_enabled: bool = True
     accounts_path: Path = PROJECT_ROOT / ".run" / "accounts.sqlite3"
     ai_enabled: bool = False
-    ai_corpus_path: Path = PROJECT_ROOT / "data" / "local" / "pilot_chunks.jsonl"
+    ai_corpus_path: Path = DEFAULT_CORPUS_PATH
     ai_ollama_url: str = "http://127.0.0.1:11434"
+    ai_ollama_internal_host: str | None = None
     ai_model: str = DEFAULT_MODEL
     ai_model_digest: str = DEFAULT_DIGEST
     ai_request_timeout: float = 60
@@ -49,6 +54,7 @@ class Settings(BaseSettings):
         return AISettings(
             corpus_path=self.ai_corpus_path,
             ollama_url=self.ai_ollama_url,
+            ollama_internal_host=self.ai_ollama_internal_host,
             model=self.ai_model,
             model_digest=self.ai_model_digest,
             request_timeout=self.ai_request_timeout,
@@ -61,7 +67,7 @@ class Settings(BaseSettings):
         )
 
     @field_validator(
-        "history_path", "accounts_path", "ai_corpus_path", "ai_podcast_corpus_path", "ai_e5_model_dir",
+        "history_path", "reminders_path", "analytics_path", "accounts_path", "ai_corpus_path", "ai_podcast_corpus_path", "ai_e5_model_dir",
         mode="before",
     )
     @classmethod

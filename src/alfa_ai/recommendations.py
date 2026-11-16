@@ -1,7 +1,9 @@
 """Rank a curated catalog of public cards with explicit access constraints."""
 
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from hashlib import sha256
 
 from .contracts import AIRequest, LearningProfile, Recommendation
 from .reviewed import (
@@ -233,8 +235,41 @@ CATALOG = (
     ),
 )
 
+CATALOG_SHA256 = "10d9b7b96fd02cd382b56a7ac62b71ddec66971684198a74db698693093f6fc3"
+
+
+def verify_catalog() -> None:
+    payload = json.dumps(
+        [asdict(card) for card in CATALOG],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if sha256(payload).hexdigest() != CATALOG_SHA256:
+        raise ValueError("Проверенный каталог материалов изменён.")
+
+
+verify_catalog()
+
 
 TOPIC_PATTERNS = {key: re.compile(rf"\b(?:{pattern})\b") for key, (_, pattern) in TOPICS.items()}
+TOPIC_TYPO_STEMS = {
+    "retention": ("возврат",),
+    "support": ("поддержк",),
+    "marketplaces": ("маркетплейс", "вайлдберриз"),
+    "resale": ("ресейл", "перепродаж"),
+    "labels": ("термопринтер", "термотрансфер", "этикет"),
+    "loyalty": ("лояльност", "бонус"),
+    "service": ("обслуживан",),
+    "feedback": ("обратн",),
+    "cashflow": ("кассов",),
+    "funding": ("финансирован",),
+    "delivery": ("гиперлокальн",),
+    "conflict": ("конфликт", "жалоб"),
+    "remote": ("распределенн", "онбординг"),
+    "hiring": ("рекрутинг",),
+    "repeat_sales": ("когорт",),
+}
 FREE_ONLY = re.compile(r"\b(?:бесплатн\w*|без\s+оплаты|не\s+предлагай\s+платн\w*)\b")
 MIXED_ACCESS = re.compile(
     r"\b(?:не\s+только\s+бесплатн\w*|платн\w*\s+и\s+бесплатн\w*|бесплатн\w*\s+и\s+платн\w*)\b"
@@ -274,7 +309,10 @@ def recommend_materials(
     format_match = FORMAT_ONLY.search(query)
     if format_match:
         required_format = FORMAT_NAMES[format_match.group(1)]
-    matched = {key for key, pattern in TOPIC_PATTERNS.items() if pattern.search(query)}
+    matched = {
+        key for key, pattern in TOPIC_PATTERNS.items()
+        if pattern.search(query) or _has_one_edit_topic_typo(query, key)
+    }
     candidates = []
     for card in CATALOG:
         if card.material_id in excluded_ids or (free_only and card.access != "free"):
@@ -313,3 +351,46 @@ def recommend_materials(
             )
         )
     return tuple(item for _, item in sorted(candidates, key=lambda row: row[0])[:2])
+
+
+def _has_one_edit_topic_typo(query: str, topic: str) -> bool:
+    """Tolerate one typo in distinctive catalog terms, without fuzzy free text."""
+    words = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+    return any(
+        _prefix_within_one_edit(word, stem)
+        for word in words
+        for stem in TOPIC_TYPO_STEMS.get(topic, ())
+    )
+
+
+def _prefix_within_one_edit(word: str, stem: str) -> bool:
+    if len(word) < len(stem) - 1:
+        return False
+    return any(
+        _within_one_edit(word[:size], stem)
+        for size in (len(stem) - 1, len(stem), len(stem) + 1)
+        if size <= len(word)
+    )
+
+
+def _within_one_edit(left: str, right: str) -> bool:
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        mismatches = [
+            index for index, pair in enumerate(zip(left, right))
+            if pair[0] != pair[1]
+        ]
+        if len(mismatches) <= 1:
+            return True
+        return (
+            len(mismatches) == 2
+            and mismatches[1] == mismatches[0] + 1
+            and left[mismatches[0]] == right[mismatches[1]]
+            and left[mismatches[1]] == right[mismatches[0]]
+        )
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    index = 0
+    while index < len(shorter) and shorter[index] == longer[index]:
+        index += 1
+    return shorter[index:] == longer[index + 1:]
