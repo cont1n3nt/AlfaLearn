@@ -1,0 +1,35 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+.uv-cache/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Editors, OS and runtime output
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+.run/
+
+# Local case datasets
+data/
+docs/source/
+*.backup
+*.dump
+!assets/corpus_manifest.json

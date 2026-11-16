@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "purpose": "Release allow-list for reviewed public corpus only; not a source-data export.",
+  "artifacts": [
+    {"path": "assets/reviewed_articles.jsonl", "kind": "article_passages", "access": "public_reviewed", "records": 133, "source_documents": 21, "source_block_ids": "Each JSONL record contains reviewed source_block_orders.", "sha256": "6dad98fed9b35db108b45911d1a6787cf081e678b1b2ed33d79e38849dec4ef7"},
+    {"path": "assets/reviewed_podcasts.json", "kind": "podcast_cues", "access": "public_manually_reviewed", "records": 12, "source_documents": 1, "source_block_ids": "episode_id + cue start_sec/end_sec", "sha256": "3df378f54466076cb9a317b62e7385074161046e9a04e50271d32c9ec7ad106c"}
+  ],
+  "audit_queue": "ASR, paid lessons and unreviewed HTML stay out of the release corpus until a reviewer records URL, public access, source blocks and SHA-256."
+}
